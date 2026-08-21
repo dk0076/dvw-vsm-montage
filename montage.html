@@ -1349,6 +1349,60 @@ async function encodeTitle(title, sub, v, frameDur, seconds){
   if (!description) throw new Error('encoder returned no avcC — cannot build a sample entry');
   return { frames, description };
 }
+/* Re-parse the file we just wrote. A Blob exposes .slice and .size, so the same
+   reader works on it — this answers "are the cards actually in the file?" without
+   depending on how any given player behaves. */
+async function verifyMp4(blob){
+  const rd = async (a,b) => new Uint8Array(await blob.slice(a,b).arrayBuffer());
+  let off = 0, moovBox = null;
+  while (off < blob.size){
+    const h = await rd(off, Math.min(off+16, blob.size));
+    if (h.length < 8) break;
+    const dv = new DataView(h.buffer);
+    let size = dv.getUint32(0);
+    const type = fcc(h, 4);
+    if (size === 1) size = Number(dv.getBigUint64(8));
+    else if (size === 0) size = blob.size - off;
+    if (size < 8) break;
+    if (type === 'moov') moovBox = { start: off, size };
+    off += size;
+  }
+  if (!moovBox) return { error: 'no moov in output' };
+
+  const buf = await rd(moovBox.start, moovBox.start + moovBox.size);
+  const dv = new DataView(buf.buffer);
+  const moov = { body: 8, end: buf.length };
+
+  for (const trak of mall(buf, moov, 'trak')){
+    const mdia = mfind(buf, trak, 'mdia'); if (!mdia) continue;
+    const minf = mfind(buf, mdia, 'minf'); if (!minf) continue;
+    const stbl = mfind(buf, minf, 'stbl'); if (!stbl) continue;
+
+    const stsd = mfind(buf, stbl, 'stsd');
+    const formats = [];
+    for (const e of mboxes(buf, stsd.body + 8, stsd.end)) formats.push(e.type);
+
+    const co = mfind(buf, stbl, 'co64') || mfind(buf, stbl, 'stco');
+    const chunks = dv.getUint32(co.body + 4);
+    const samples = dv.getUint32(mfind(buf, stbl, 'stsz').body + 8);
+
+    const stsc = mfind(buf, stbl, 'stsc');
+    const n = dv.getUint32(stsc.body + 4);
+    const ent = [];
+    for (let i = 0; i < n; i++) ent.push({
+      first: dv.getUint32(stsc.body + 8  + i*12),
+      per:   dv.getUint32(stsc.body + 12 + i*12),
+      desc:  dv.getUint32(stsc.body + 16 + i*12) });
+
+    const byDesc = {};
+    ent.forEach((e,i) => {
+      const last = i+1 < ent.length ? ent[i+1].first - 1 : chunks;
+      byDesc[e.desc] = (byDesc[e.desc] || 0) + (last - e.first + 1);
+    });
+    return { entries: dv.getUint32(stsd.body + 4), formats, chunks, samples, byDesc };
+  }
+  return { error: 'no video track in output' };
+}
 /* Map a clip's time window to a sample range, snapping the start back to the
    nearest preceding sync sample — the reason a short GOP matters. */
 function clipSamples(v, startSec, endSec){
@@ -1463,6 +1517,13 @@ $('expMp4').onclick = async () => {
     const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 
+    const vfy = await verifyMp4(blob);
+    const vtxt = vfy.error ? ` \u00b7 VERIFY FAILED: ${vfy.error}`
+      : ` \u00b7 verified: ${vfy.entries} sample entr${vfy.entries===1?'y':'ies'} ` +
+        `[${vfy.formats.join(',')}], ${vfy.chunks} chunks ` +
+        `(${Object.entries(vfy.byDesc).map(([d,n]) => `${n} on entry ${d}`).join(', ')}), ` +
+        `${vfy.samples.toLocaleString()} frames`;
+
     // Report how far each in-point slid back to reach an IDR.
     const snap = placed.map((p,i) => clips[i].s - p.actualStart);
     const worst = Math.max(...snap);
@@ -1472,7 +1533,7 @@ $('expMp4').onclick = async () => {
       `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy, no re-encode \u00b7 ` +
       `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
       (cards ? ` \u00b7 ${cards} title cards (${cardFrames} frames written)` : '') +
-      (cardError ? ` \u00b7 title cards skipped: ${cardError}` : ''));
+      (cardError ? ` \u00b7 title cards skipped: ${cardError}` : '') + vtxt);
   } catch (err){
     status('Export failed: ' + (err.message || err)); bar(0); console.error(err);
   } finally { $('expMp4').disabled = false; }
