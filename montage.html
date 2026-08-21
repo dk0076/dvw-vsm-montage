@@ -245,6 +245,87 @@ function codeTable(arr){
   return m;
 }
 
+/* ── team side mapping ───────────────────────────────────────
+   The play-level `team` code is not documented to map to home/away in any fixed
+   order, and getting it backwards silently mislabels every clip. Resolve it from
+   evidence: an explicit code on the team object if present, otherwise by matching
+   the jersey numbers each code actually used against the two rosters.          */
+
+const pad2 = n => String(n).replace(/\D/g,'').padStart(2,'0');
+
+function jerseysOf(team){
+  return new Set((team?.players||[]).map(p =>
+    pad2(p.number ?? p.shirtNumber ?? p.shirt ?? '')).filter(x => x !== '00' || true));
+}
+
+function resolveSides(d, plays){
+  const codes = [...new Set(plays.map(p => p.team).filter(Boolean))].sort();
+  const home = d.team?.home, away = d.team?.away;
+  S.codes = codes;
+
+  // 1. Explicit code on the team object.
+  const hc = home?.code ?? home?.id ?? home?.key;
+  const ac = away?.code ?? away?.id ?? away?.key;
+  if (hc && ac && codes.includes(String(hc)) && codes.includes(String(ac)) && hc !== ac){
+    S.codeOf = { home: String(hc), away: String(ac) };
+    S.sideSrc = 'explicit code on the team object';
+  } else {
+    // 2. Jersey overlap. Score each assignment by how much of each code's observed
+    //    jersey set is actually on that roster.
+    const seen = {};
+    codes.forEach(c => seen[c] = new Set(
+      plays.filter(p => p.team === c && p.player).map(p => pad2(p.player))));
+    const hj = jerseysOf(home), aj = jerseysOf(away);
+    const score = (set, roster) => {
+      if (!set.size || !roster.size) return 0;
+      let hit = 0; set.forEach(x => { if (roster.has(x)) hit++; });
+      return hit / set.size;
+    };
+    const [c0, c1] = codes;
+    const straight = score(seen[c0]||new Set(), hj) + score(seen[c1]||new Set(), aj);
+    const swapped  = score(seen[c0]||new Set(), aj) + score(seen[c1]||new Set(), hj);
+    S.codeOf = straight >= swapped
+      ? { home: c0, away: c1 }
+      : { home: c1, away: c0 };
+    S.sideConf = Math.abs(straight - swapped) / 2;
+    S.sideSrc = `jersey overlap (${(Math.max(straight,swapped)/2*100).toFixed(0)}% match, ` +
+                `margin ${(S.sideConf*100).toFixed(0)} pts)`;
+    if (S.sideConf < 0.15) S.sideSrc += ' \u2014 rosters share too many numbers to be sure';
+  }
+  if (S.swapped) S.codeOf = { home: S.codeOf.away, away: S.codeOf.home };
+  S.sideOf = { [S.codeOf.home]:'home', [S.codeOf.away]:'away' };
+}
+
+function buildRoster(d){
+  const roster = {}, rosterPos = {}, liberos = new Set();
+  S.teams = {};
+  for (const side of ['home','away']){
+    const t = (d.team||{})[side];
+    const k = S.codeOf?.[side];
+    if (!t || !k) continue;
+    S.teams[k] = t.name || t.code || side;
+    (t.libero||[]).forEach(n => liberos.add(k + pad2(n)));
+    (t.players||[]).forEach(p => {
+      const num = pad2(p.number ?? p.shirtNumber ?? p.shirt ?? '');
+      const nm  = [p.firstName, p.lastName].filter(Boolean).join(' ') || p.name || '';
+      roster[k + num] = nm;
+      if (p.position != null) rosterPos[k + num] = String(p.position);
+      if (p.libero || p.isLibero) liberos.add(k + num);
+    });
+  }
+  S.roster = roster; S.rosterPos = rosterPos; S.liberos = liberos;
+}
+
+function swapSides(){
+  S.swapped = !S.swapped;
+  S.codeOf = { home: S.codeOf.away, away: S.codeOf.home };
+  S.sideOf = { [S.codeOf.home]:'home', [S.codeOf.away]:'away' };
+  buildRoster(S.raw);
+  computeRoles();
+  S.filt = {};
+  render();
+}
+
 /* ── position ────────────────────────────────────────────────
    The roster's position field is inconsistently populated, so resolve it in two
    stages: trust the roster where it maps to a known bucket, otherwise derive the
@@ -305,9 +386,10 @@ function computeRoles(){
 
 const sideOf = p => {
   const s = p.toLowerCase();
-  if (/away|visit|guest|teamb|\/b(\/|$)/.test(s)) return 'b';
-  if (/home|teama|\/a(\/|$)/.test(s))            return 'a';
-  return null;
+  if (/away|visit|guest|teamb/.test(s)) return S.codeOf?.away ?? 'b';
+  if (/home|teama/.test(s))             return S.codeOf?.home ?? 'a';
+  const m = s.match(/\/([ab])(\/|$)/);
+  return m ? m[1] : null;
 };
 const num = x => { const n = Number(String(x).trim()); return Number.isFinite(n) ? n : null; };
 
@@ -395,24 +477,6 @@ async function loadVsm(f){
 
   S.labels = Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls));
 
-  const roster = {}, rosterPos = {}, liberos = new Set();
-  for (const side of ['home','away']){
-    const t = (d.team||{})[side];
-    if (!t) continue;
-    const k = side === 'home' ? 'a' : 'b';
-    S.teams[k] = t.name || t.code || side;
-    const pad = n => String(n).replace(/\D/g,'').padStart(2,'0');
-    (t.libero||[]).forEach(n => liberos.add(k + pad(n)));
-    (t.players||[]).forEach(p => {
-      const num = pad(p.number ?? p.shirtNumber ?? p.shirt ?? '');
-      const nm  = [p.firstName, p.lastName].filter(Boolean).join(' ') || p.name || '';
-      roster[k + num] = nm;
-      if (p.position != null) rosterPos[k + num] = String(p.position);
-      if (p.libero || p.isLibero) liberos.add(k + num);
-    });
-  }
-  S.roster = roster; S.rosterPos = rosterPos; S.liberos = liberos;
-
   const plays = [], rallies = [];
   (d.scout?.sets || []).forEach((st, si) => {
     (st.events || []).forEach(ev => {
@@ -434,6 +498,8 @@ async function loadVsm(f){
   if (!plays.length) throw new Error('no plays found under scout.sets[].events[].exchange.plays[]');
 
   S.plays = plays; S.rallies = rallies;
+  resolveSides(d, plays);
+  buildRoster(d);
   computeRoles();
   S.rotInfo = computeRotations(rallies, plays);
   plays.forEach(p => {
@@ -870,6 +936,18 @@ function render(){
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
   if (S.file) add('scout', `${S.file.name} \u00b7 ${S.plays.length.toLocaleString()} plays \u00b7 ` +
     `${S.rallies.length} rallies \u00b7 ${S.teams.a} vs ${S.teams.b}`);
+  if (S.codeOf){
+    const r = t.insertRow();
+    r.insertCell().textContent = 'sides';
+    const c = r.insertCell();
+    c.innerHTML = `<code>${S.codeOf.home}</code> = ${S.teams[S.codeOf.home]} (home) &nbsp;` +
+      `<code>${S.codeOf.away}</code> = ${S.teams[S.codeOf.away]} (away)<br>` +
+      `<span style="color:#7d8896">${S.sideSrc}${S.swapped ? ' \u00b7 manually swapped' : ''}</span> `;
+    const b = el('button', null, 'Swap sides');
+    b.style.marginTop = '4px';
+    b.onclick = swapSides;
+    c.appendChild(b);
+  }
   if (S.rotInfo){
     const r = S.rotInfo, pct = r.total ? Math.round(100*r.hit/r.total) : 0;
     const who = Object.entries(r.setter)
