@@ -1,0 +1,8 @@
+fixtures/*
+!fixtures/README.md
+node_modules/
+*.mp4
+*.mov
+*.m4v
+*.vsm
+*.dvw
