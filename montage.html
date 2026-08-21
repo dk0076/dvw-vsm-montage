@@ -47,6 +47,12 @@
          letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px}
 
   video{width:100%;background:#000;border-radius:4px;display:block}
+  #card{position:absolute;inset:0;background:#0b0f14;border-radius:4px;display:flex;
+        flex-direction:column;justify-content:center;padding:0 9%;gap:10px}
+  #card[hidden]{display:none}
+  #card span{font:600 clamp(20px,4.2vw,40px)/1.15 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif;
+             color:#eef4fb;border-left:4px solid var(--key);padding-left:14px}
+  #card em{font-style:normal;color:var(--dim);font-size:13px;padding-left:18px}
   .drop{border:1px dashed var(--line2);border-radius:5px;padding:16px;text-align:center;
         color:var(--dim);cursor:pointer;background:#12181f}
   .drop:hover,.drop.hot{border-color:var(--key);color:var(--ink)}
@@ -171,6 +177,10 @@
     <div id="reel"></div>
     <div class="rule"></div>
     <div class="row">
+      <label class="f"><input type="checkbox" id="titleCards" checked> Section title cards</label>
+      <label class="f">Hold <input type="number" id="titleSec" value="2" step="0.5" min="0.5"></label>
+    </div>
+    <div class="row" style="margin-top:8px">
       <button class="go" id="playReel">Play reel</button>
       <button class="go" id="expMp4">Export MP4</button>
       <button id="expEdl">EDL (json)</button>
@@ -185,7 +195,13 @@
 <div class="right">
   <section>
     <h2>Video <span id="vpos"></span></h2>
-    <video id="v" controls preload="metadata"></video>
+    <div style="position:relative">
+      <video id="v" controls preload="metadata"></video>
+      <div id="card" hidden>
+        <span id="cardTitle"></span>
+        <em id="cardSub"></em>
+      </div>
+    </div>
     <div class="row" style="margin-top:9px">
       <button id="prev">&#8592; Prev</button>
       <button id="next">Next &#8594;</button>
@@ -992,11 +1008,28 @@ const active = () => S.src === 'reel' ? reelClips() : S.clips;
 
 const V = $('v');
 
+let cardTimer = null;
+function hideCard(){ clearTimeout(cardTimer); cardTimer = null; $('card').hidden = true; }
+
 function seekClip(i){
-  const c = active()[i]; if (!c) return;
-  V.currentTime = c.s + (+$('nudge').value || 0);
-  $('nowPlaying').textContent = `${String(c.n).padStart(3,'0')}  ${c.label}`;
-  V.play().catch(()=>{});
+  const list = active(), c = list[i];
+  if (!c) return;
+  const go = () => {
+    V.currentTime = c.s + (+$('nudge').value || 0);
+    $('nowPlaying').textContent = `${String(c.n).padStart(3,'0')}  ${c.label}`;
+    V.play().catch(()=>{});
+  };
+  const prev = list[i-1];
+  const entering = c.section && (!prev || prev.section !== c.section);
+  if (S.montage && entering && $('titleCards').checked){
+    const n = list.filter(x => x.section === c.section).length;
+    $('cardTitle').textContent = c.section;
+    $('cardSub').textContent = `${n} clip${n===1?'':'s'}`;
+    $('card').hidden = false;
+    V.pause();
+    clearTimeout(cardTimer);
+    cardTimer = setTimeout(() => { hideCard(); go(); }, (+$('titleSec').value || 2) * 1000);
+  } else { hideCard(); go(); }
 }
 $('play').onclick = () => { if (!S.clips.length) return;
   S.src = 'filter'; S.montage = true; S.cur = 0; seekClip(0); render(); };
@@ -1004,7 +1037,7 @@ $('playReel').onclick = () => { if (!S.reel.length) return;
   S.src = 'reel'; S.montage = true; S.cur = 0; seekClip(0); render(); };
 $('next').onclick = () => { if (S.cur < active().length-1){ S.cur++; seekClip(S.cur); render(); } };
 $('prev').onclick = () => { if (S.cur > 0){ S.cur--; seekClip(S.cur); render(); } };
-$('stopMon').onclick = () => { S.montage = false; V.pause(); };
+$('stopMon').onclick = () => { S.montage = false; hideCard(); V.pause(); };
 
 V.addEventListener('timeupdate', () => {
   $('vpos').textContent = clock(V.currentTime);
@@ -1164,24 +1197,28 @@ const fbox = (t, ver, flags, ...p) => box(t, new Uint8Array([ver, flags>>16&255,
 const MATRIX = cat(B.u32(0x10000),B.u32(0),B.u32(0),B.u32(0),B.u32(0x10000),
                    B.u32(0),B.u32(0),B.u32(0),B.u32(0x40000000));
 
-function buildMoov(v, sel, chunkOffsets){
+function buildMoov(v, sel, chunkOffsets, titleEntry){
   // Run-length the timing and chunk tables the way the spec expects.
   const stts = [];
   sel.dur.forEach(d => { const l = stts[stts.length-1];
     if (l && l.d === d) l.c++; else stts.push({ c:1, d }); });
+  // stsc also breaks on a change of sample description, which is how title
+  // chunks select the generated entry while footage chunks keep the source one.
   const stsc = [];
-  sel.perChunk.forEach((per,i) => { const l = stsc[stsc.length-1];
-    if (!l || l.per !== per) stsc.push({ first:i+1, per }); });
+  sel.perChunk.forEach((per,i) => { const desc = sel.desc[i] || 1;
+    const l = stsc[stsc.length-1];
+    if (!l || l.per !== per || l.desc !== desc) stsc.push({ first:i+1, per, desc }); });
 
   const mediaDur = sel.dur.reduce((a,b) => a+b, 0);
   const movieTs  = 1000;
   const movieDur = Math.round(mediaDur / v.timescale * movieTs);
 
+  const entries = titleEntry ? [v.sampleEntry, titleEntry] : [v.sampleEntry];
   const stblParts = [
-    box('stsd', new Uint8Array([0,0,0,0]), B.u32(1), v.sampleEntry),
+    box('stsd', new Uint8Array([0,0,0,0]), B.u32(entries.length), ...entries),
     fbox('stts',0,0, B.u32(stts.length), cat(stts.map(e => cat(B.u32(e.c), B.u32(e.d))))),
     fbox('stsc',0,0, B.u32(stsc.length),
-         cat(stsc.map(e => cat(B.u32(e.first), B.u32(e.per), B.u32(1))))),
+         cat(stsc.map(e => cat(B.u32(e.first), B.u32(e.per), B.u32(e.desc))))),
     fbox('stsz',0,0, B.u32(0), B.u32(sel.size.length), cat(sel.size.map(B.u32))),
     fbox('co64',0,0, B.u32(chunkOffsets.length), cat(chunkOffsets.map(B.u64)))
   ];
@@ -1216,6 +1253,98 @@ function buildMoov(v, sel, chunkOffsets){
           box('stbl', ...stblParts)))));
 }
 
+/* ── section title cards ─────────────────────────────────────
+   A generated card cannot share the source's SPS/PPS, so it gets its own entry
+   in stsd and its chunks point at it via stsc. The footage stays an untouched
+   stream copy; only these few seconds are ever encoded.                      */
+
+function codecStringOf(entry){
+  for (let i = 0; i + 8 < entry.length; i++){
+    if (entry[i+4]===0x61 && entry[i+5]===0x76 && entry[i+6]===0x63 && entry[i+7]===0x43){
+      const b = i+8, hx = n => n.toString(16).padStart(2,'0');
+      return `avc1.${hx(entry[b+1])}${hx(entry[b+2])}${hx(entry[b+3])}`;
+    }
+  }
+  return null;
+}
+
+function avc1Entry(w, h, avcC){
+  const body = cat(
+    new Uint8Array(6), B.u16(1),                    // reserved, data_reference_index
+    B.u16(0), B.u16(0), B.u32(0), B.u32(0), B.u32(0),
+    B.u16(w), B.u16(h),
+    B.u32(0x00480000), B.u32(0x00480000),           // 72 dpi
+    B.u32(0), B.u16(1),                             // reserved, frame_count
+    new Uint8Array(32),                             // compressorname
+    B.u16(0x0018), new Uint8Array([0xff,0xff]),     // depth, pre_defined
+    box('avcC', avcC));
+  return cat(B.u32(body.length + 8), B.s4('avc1'), body);
+}
+
+function drawCard(cx, w, h, title, sub){
+  cx.fillStyle = '#0b0f14'; cx.fillRect(0,0,w,h);
+  const m = w * 0.09;
+  cx.fillStyle = '#8fd0ff';
+  cx.fillRect(m, h*0.38, w*0.07, Math.max(3, h*0.008));
+
+  let size = Math.round(h * 0.13);
+  const fit = () => { cx.font = `600 ${size}px ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial`;
+    return cx.measureText(title).width; };
+  while (fit() > w - m*2 && size > 12) size -= 2;
+  cx.fillStyle = '#eef4fb';
+  cx.textBaseline = 'alphabetic';
+  cx.fillText(title, m, h*0.56);
+
+  if (sub){
+    cx.font = `400 ${Math.round(h*0.045)}px ui-monospace,Menlo,Consolas,monospace`;
+    cx.fillStyle = '#7d8896';
+    cx.fillText(sub, m, h*0.66);
+  }
+}
+
+async function encodeTitle(title, sub, v, frameDur, seconds){
+  if (!window.VideoEncoder) throw new Error('WebCodecs VideoEncoder unavailable in this browser');
+  const w = v.width, h = v.height;
+  const cv = new OffscreenCanvas(w, h);
+  drawCard(cv.getContext('2d'), w, h, title, sub);
+
+  const fps = v.timescale / frameDur;
+  const candidates = [codecStringOf(v.sampleEntry), 'avc1.640028', 'avc1.42e01e'].filter(Boolean);
+  let codec = null;
+  for (const c of candidates){
+    try { const r = await VideoEncoder.isConfigSupported({ codec:c, width:w, height:h,
+            avc:{format:'avc'}, bitrate: 3e6, framerate: fps });
+          if (r.supported){ codec = c; break; } } catch {}
+  }
+  if (!codec) throw new Error('no supported H.264 encoder configuration');
+
+  const frames = [];
+  let description = null, failed = null;
+  const enc = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (!description && meta?.decoderConfig?.description)
+        description = new Uint8Array(meta.decoderConfig.description);
+      const d = new Uint8Array(chunk.byteLength); chunk.copyTo(d);
+      frames.push({ data: d, key: chunk.type === 'key' });
+    },
+    error: e => { failed = e; }
+  });
+  enc.configure({ codec, width:w, height:h, avc:{format:'avc'},
+                  bitrate: 3e6, framerate: fps, latencyMode:'quality' });
+
+  const n = Math.max(1, Math.round(seconds * fps));
+  const usPer = 1e6 / fps;
+  for (let i = 0; i < n; i++){
+    const f = new VideoFrame(cv, { timestamp: Math.round(i*usPer), duration: Math.round(usPer) });
+    enc.encode(f, { keyFrame: i === 0 });
+    f.close();
+  }
+  await enc.flush();
+  enc.close();
+  if (failed) throw failed;
+  if (!description) throw new Error('encoder returned no avcC — cannot build a sample entry');
+  return { frames, description };
+}
 /* Map a clip's time window to a sample range, snapping the start back to the
    nearest preceding sync sample — the reason a short GOP matters. */
 function clipSamples(v, startSec, endSec){
@@ -1227,51 +1356,85 @@ function clipSamples(v, startSec, endSec){
   return [a, b];
 }
 
-async function exportMp4(clips, onProgress){
+async function exportMp4(clips, onProgress, opts){
+  opts = opts || {};
   const M = S.mp4;
   if (!M || M.error) throw new Error(M?.error || 'video not parsed');
   const v = M.video;
+  const frameDur = v.dur[0] || Math.round(v.timescale/30);
 
-  const sel = { size:[], dur:[], sync:[], cts: v.cts ? [] : null, perChunk:[] };
-  const runs = [];                              // contiguous source byte ranges
-  let outPos = 0;
-  const chunkOffsets = [];                      // one chunk per clip
+  // One card per section, encoded up front.
+  const cards = {};
+  let titleEntry = null;
+  if (opts.titles){
+    const names = [];
+    clips.forEach(c => { if (c.section && !names.includes(c.section)) names.push(c.section); });
+    for (const name of names){
+      const n = clips.filter(c => c.section === name).length;
+      cards[name] = await encodeTitle(name, `${n} clip${n===1?'':'s'}`, v, frameDur,
+                                      opts.titleSeconds || 2);
+    }
+    const first = cards[names[0]];
+    if (first) titleEntry = avc1Entry(v.width, v.height, first.description);
+  }
+
+  const sel = { size:[], dur:[], sync:[], cts: v.cts ? [] : null, perChunk:[], desc:[] };
+  const parts = [];                             // output byte order: Blob slices and card bytes
+  let run = null, outPos = 0;
+  const chunkOffsets = [];
   const placed = [];
+  const flushRun = () => { if (run){ parts.push(M.file.slice(run.start, run.end)); run = null; } };
 
+  let lastSection = null;
   clips.forEach((c, ci) => {
+    if (titleEntry && c.section && c.section !== lastSection && cards[c.section]){
+      flushRun();
+      const card = cards[c.section];
+      chunkOffsets.push(outPos);
+      sel.perChunk.push(card.frames.length);
+      sel.desc.push(2);                         // the generated sample entry
+      card.frames.forEach(f => {
+        sel.size.push(f.data.length); sel.dur.push(frameDur); sel.sync.push(f.key ? 1 : 0);
+        if (sel.cts) sel.cts.push(0);
+        parts.push(f.data); outPos += f.data.length;
+      });
+    }
+    lastSection = c.section;
+
     const [a,b] = clipSamples(v, c.s, c.e);
     chunkOffsets.push(outPos);
     sel.perChunk.push(b - a + 1);
+    sel.desc.push(1);                           // the source sample entry, untouched
     placed.push({ n: ci+1, actualStart: v.dts[a]/v.timescale,
                   actualEnd: (v.dts[b]+v.dur[b])/v.timescale, label: c.label });
     for (let i = a; i <= b; i++){
       sel.size.push(v.size[i]); sel.dur.push(v.dur[i]); sel.sync.push(v.sync[i]);
       if (sel.cts) sel.cts.push(v.cts[i]);
-      const last = runs[runs.length-1];
-      if (last && last.end === v.off[i]) last.end += v.size[i];
-      else runs.push({ start: v.off[i], end: v.off[i] + v.size[i] });
+      if (run && run.end === v.off[i]) run.end += v.size[i];
+      else { flushRun(); run = { start: v.off[i], end: v.off[i] + v.size[i] }; }
       outPos += v.size[i];
     }
-    onProgress?.((ci+1)/clips.length);
+    if (onProgress) onProgress((ci+1)/clips.length);
   });
+  flushRun();
 
   const ftyp = box('ftyp', B.s4('isom'), B.u32(0x200),
                    B.s4('isom'), B.s4('iso2'), B.s4('avc1'), B.s4('mp41'));
 
   // co64 is fixed-width, so the moov length does not change when offsets are
   // filled in — build once to measure, once for real.
-  const probe = buildMoov(v, sel, chunkOffsets.map(() => 0));
+  const probe = buildMoov(v, sel, chunkOffsets.map(() => 0), titleEntry);
   const mdatStart = ftyp.length + probe.length;
   const mdatHdr = outPos + 8 > 0xFFFFFFFF
     ? cat(B.u32(1), B.s4('mdat'), B.u64(outPos + 16))
     : cat(B.u32(outPos + 8), B.s4('mdat'));
   const base = mdatStart + mdatHdr.length;
-  const moov = buildMoov(v, sel, chunkOffsets.map(o => o + base));
+  const moov = buildMoov(v, sel, chunkOffsets.map(o => o + base), titleEntry);
   if (moov.length !== probe.length) throw new Error('moov length unstable');
 
-  // Blob slices are lazily backed by the file — no video payload enters memory.
-  const parts = [ftyp, moov, mdatHdr, ...runs.map(r => M.file.slice(r.start, r.end))];
-  return { blob: new Blob(parts, { type:'video/mp4' }), placed, bytes: outPos };
+  // Blob slices stay lazily backed by the file — no footage enters memory.
+  return { blob: new Blob([ftyp, moov, mdatHdr, ...parts], { type:'video/mp4' }),
+           placed, bytes: outPos, cards: Object.keys(cards).length };
 }
 
 $('expMp4').onclick = async () => {
@@ -1284,7 +1447,9 @@ $('expMp4').onclick = async () => {
     if (!S.mp4){ status('Reading sample table\u2026'); bar(0.05); S.mp4 = await parseMp4(S.video); }
     if (S.mp4.error) throw new Error(S.mp4.error);
     status(`Assembling ${clips.length} clips\u2026`);
-    const { blob, placed, bytes } = await exportMp4(clips, p => bar(0.05 + p*0.9));
+    const { blob, placed, bytes, cards } = await exportMp4(clips, p => bar(0.05 + p*0.9),
+      { titles: $('titleCards').checked && S.src === 'reel',
+        titleSeconds: +$('titleSec').value || 2 });
 
     const name = (S.file?.name || 'montage').replace(/\.[^.]+$/,'') +
                  (S.src === 'reel' ? '-reel' : '-filter') + '.mp4';
@@ -1298,7 +1463,8 @@ $('expMp4').onclick = async () => {
     bar(1);
     status(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
       `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy, no re-encode \u00b7 ` +
-      `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in`);
+      `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
+      (cards ? ` \u00b7 ${cards} title cards` : ''));
   } catch (err){
     status('Export failed: ' + (err.message || err)); bar(0); console.error(err);
   } finally { $('expMp4').disabled = false; }
