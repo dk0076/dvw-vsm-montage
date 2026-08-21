@@ -245,6 +245,58 @@ function codeTable(arr){
   return m;
 }
 
+/* ── position ────────────────────────────────────────────────
+   The roster's position field is inconsistently populated, so resolve it in two
+   stages: trust the roster where it maps to a known bucket, otherwise derive the
+   role from what the player actually did. Derivation leans on the fact that middle
+   routes carry L-prefix combinations on the attack touch.                       */
+
+const POS_ORDER = ['Setter','Outside','Middle','Opposite','Libero','Attacker','Reserve'];
+const POS_ABBR  = { Setter:'S', Outside:'OH', Middle:'MB', Opposite:'OPP',
+                    Libero:'L', Attacker:'HIT', Reserve:'\u2013' };
+
+function normPos(s){
+  const x = String(s).toLowerCase();
+  if (/lib/.test(x))                     return 'Libero';
+  if (/set|palleg|^s$|^1$/.test(x))      return 'Setter';
+  if (/mid|middle|centr|^mb$|^m$/.test(x)) return 'Middle';
+  if (/oppos|oppo|^opp$|^o$|diag/.test(x)) return 'Opposite';
+  if (/outs|wing|recept|^oh$|^wp$/.test(x)) return 'Outside';
+  return null;
+}
+
+function computeRoles(){
+  const stat = {};
+  S.plays.forEach(p => {
+    if (!p.player) return;
+    const k = p.team + p.player;
+    const r = stat[k] || (stat[k] = { set:0, att:0, mid:0, rec:0, dig:0, srv:0 });
+    if (p.skill === 'E') r.set++;
+    if (p.skill === 'A'){ r.att++; if (/^L/.test(p.combination||'')) r.mid++; }
+    if (p.skill === 'R') r.rec++;
+    if (p.skill === 'D') r.dig++;
+    if (p.skill === 'S') r.srv++;
+  });
+
+  const roles = {}, how = {};
+  const keys = new Set([...Object.keys(stat), ...Object.keys(S.roster||{})]);
+  for (const k of keys){
+    const fromRoster = S.rosterPos?.[k] ? normPos(S.rosterPos[k]) : null;
+    if (fromRoster){ roles[k] = fromRoster; how[k] = 'roster'; continue; }
+    if (S.liberos?.has(k)){ roles[k] = 'Libero'; how[k] = 'roster'; continue; }
+
+    const r = stat[k];
+    how[k] = 'derived';
+    if (!r || (r.set + r.att + r.rec + r.dig + r.srv) < 4) { roles[k] = 'Reserve'; continue; }
+    if (r.att === 0 && r.srv === 0 && (r.rec + r.dig) >= 8) { roles[k] = 'Libero'; continue; }
+    if (r.set >= 12 && r.set > r.att * 2)                   { roles[k] = 'Setter'; continue; }
+    if (r.att >= 6 && r.mid / r.att > 0.5)                  { roles[k] = 'Middle'; continue; }
+    // Outside hitters pass; opposites largely do not. Weak but better than nothing.
+    if (r.att >= 6) { roles[k] = r.rec >= r.att * 0.4 ? 'Outside' : 'Opposite'; continue; }
+    roles[k] = 'Reserve';
+  }
+  S.roles = roles; S.roleSrc = how;
+}
 /* ── rotation ────────────────────────────────────────────────
    Rotation is not on the play; it has to come off the event's lineup state.
    VolleyStation's field names for that vary by version, so scan rather than
@@ -343,18 +395,23 @@ async function loadVsm(f){
 
   S.labels = Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls));
 
-  const roster = {};
+  const roster = {}, rosterPos = {}, liberos = new Set();
   for (const side of ['home','away']){
     const t = (d.team||{})[side];
     if (!t) continue;
-    S.teams[side === 'home' ? 'a' : 'b'] = t.name || t.code || side;
+    const k = side === 'home' ? 'a' : 'b';
+    S.teams[k] = t.name || t.code || side;
+    const pad = n => String(n).replace(/\D/g,'').padStart(2,'0');
+    (t.libero||[]).forEach(n => liberos.add(k + pad(n)));
     (t.players||[]).forEach(p => {
-      const num = String(p.number ?? p.shirtNumber ?? p.shirt ?? '').padStart(2,'0');
+      const num = pad(p.number ?? p.shirtNumber ?? p.shirt ?? '');
       const nm  = [p.firstName, p.lastName].filter(Boolean).join(' ') || p.name || '';
-      roster[(side === 'home' ? 'a' : 'b') + num] = nm;
+      roster[k + num] = nm;
+      if (p.position != null) rosterPos[k + num] = String(p.position);
+      if (p.libero || p.isLibero) liberos.add(k + num);
     });
   }
-  S.roster = roster;
+  S.roster = roster; S.rosterPos = rosterPos; S.liberos = liberos;
 
   const plays = [], rallies = [];
   (d.scout?.sets || []).forEach((st, si) => {
@@ -377,6 +434,7 @@ async function loadVsm(f){
   if (!plays.length) throw new Error('no plays found under scout.sets[].events[].exchange.plays[]');
 
   S.plays = plays; S.rallies = rallies;
+  computeRoles();
   S.rotInfo = computeRotations(rallies, plays);
   plays.forEach(p => {
     p.rot   = rallies[p.rally].rot?.[p.team] ?? null;
@@ -565,7 +623,18 @@ function facets(){
   tally('attack', p => p.skill === 'A' && p.combination ? p.combination : null);
   tally('hitType',p => p.hitType);
   tally('effect', p => p.effect);
-  tally('player', p => p.player ? p.team + p.player : null);
+  tally('position', p => p.player ? (S.roles[p.team+p.player] || 'Reserve') : null,
+        (a,b) => POS_ORDER.indexOf(a) - POS_ORDER.indexOf(b));
+
+  // One group per team, ordered by position then jersey — a flat count-sorted
+  // list of both rosters interleaved is unreadable.
+  const jersey = k => parseInt(k.slice(1), 10) || 0;
+  const byRole = (a,b) => {
+    const d = POS_ORDER.indexOf(S.roles[a]||'Reserve') - POS_ORDER.indexOf(S.roles[b]||'Reserve');
+    return d || jersey(a) - jersey(b);
+  };
+  [...new Set(S.plays.map(p => p.team))].sort().forEach(t =>
+    tally('player@'+t, p => p.team === t && p.player ? t + p.player : null, byRole));
   return F;
 }
 
@@ -575,21 +644,30 @@ const FACET_TITLE = {
   phase:'Phase \u2014 what started the possession',
   call:'Setter call (on the set touch)',
   attack:'Attack combination (on the attack touch)', hitType:'Hit type',
-  effect:'Outcome', player:'Player'
+  effect:'Outcome', position:'Position'
 };
 
+const facetTitle = key => key.startsWith('player@')
+  ? `${S.teams[key.slice(7)] || key.slice(7)} \u2014 players`
+  : (FACET_TITLE[key] || key);
+
 function facetLabel(key, v){
+  if (key.startsWith('player@')){
+    const abbr = POS_ABBR[S.roles[v] || 'Reserve'] || '';
+    const nm = S.roster[v] || '';
+    return `#${v.slice(1).replace(/^0+(?=\d)/,'')} ${abbr}` + (nm ? ' ' + nm : '');
+  }
   if (key === 'skill')  return SKILL[v] || v;
   if (key === 'team')   return S.teams[v] || v;
   if (key === 'effect') return `${v} ${EFFECT[v]||''}`.trim();
-  if (key === 'player') return `${S.teams[v[0]]||v[0]} #${v.slice(1).replace(/^0+(?=\d)/,'')}` +
-                               (S.roster[v] ? ` ${S.roster[v]}` : '');
   if (key === 'call' || key === 'attack')
     return S.labels[v] ? `${v} ${S.labels[v]}` : v;
   return String(v);
 }
 
 function facetValue(p, key){
+  if (key.startsWith('player@'))
+    return p.team === key.slice(7) && p.player ? p.team + p.player : null;
   switch(key){
     case 'set': return p.set;
     case 'team': return p.team;
@@ -600,7 +678,7 @@ function facetValue(p, key){
     case 'attack': return p.skill === 'A' && p.combination ? p.combination : null;
     case 'hitType': return p.hitType;
     case 'effect': return p.effect;
-    case 'player': return p.player ? p.team + p.player : null;
+    case 'position': return p.player ? (S.roles[p.team+p.player] || 'Reserve') : null;
   }
 }
 
@@ -610,7 +688,7 @@ function renderFilters(){
   for (const f of facets()){
     if (!f.values.length) continue;
     const g = el('div','grp');
-    g.appendChild(el('b', null, FACET_TITLE[f.key] || f.key));
+    g.appendChild(el('b', null, facetTitle(f.key)));
     const box = el('div','chips');
     for (const { v, n } of f.values){
       const c = el('div','chip');
@@ -803,6 +881,13 @@ function render(){
         (who ? ` \u00b7 set-1 setters ${who}` : '')
       : 'not found in the event objects \u2014 rotation filter unavailable',
       !r.method ? 'bad' : pct > 95 ? 'ok' : 'warn');
+  }
+  if (S.roles){
+    const n = Object.values(S.roleSrc||{});
+    const fromRoster = n.filter(x => x === 'roster').length;
+    add('positions', `${fromRoster}/${n.length} from the roster, ` +
+      `${n.length-fromRoster} derived from play patterns`,
+      fromRoster === n.length ? 'ok' : 'warn');
   }
   if (S.video) add('video', `${S.video.name} \u00b7 ${bytes(S.video.size)} \u00b7 ${clock(S.videoDur)}`);
   if (!S.file || !S.video) add('waiting on',
