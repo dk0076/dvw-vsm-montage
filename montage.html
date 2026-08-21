@@ -71,6 +71,15 @@
   .rule{height:1px;background:var(--line);margin:11px 0}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   kbd{border:1px solid var(--line2);border-radius:3px;padding:0 4px;color:var(--dim);font-size:11px}
+  .bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin:9px 0 0}
+  .bar>i{display:block;height:100%;background:var(--key);width:0;transition:.2s}
+  .sec{margin-top:8px}
+  .sec>header{display:flex;gap:6px;align-items:center;color:var(--key);font-size:11px;
+              letter-spacing:.12em;text-transform:uppercase;padding:4px 0}
+  .sec>header b{flex:1;font-weight:600}
+  .sec>header button{padding:1px 6px;font-size:11px}
+  .clip button{padding:0 6px;font-size:12px;line-height:1.4}
+  #reel{max-height:420px;overflow:auto}
 </style>
 </head>
 <body>
@@ -146,12 +155,30 @@
       <label class="f">Min <input type="number" id="minlen" value="4" step="1" min="1"></label>
     </div>
     <div class="rule"></div>
+    <div class="row">
+      <input type="text" id="secName" placeholder="section name, e.g. Setter serving" style="flex:1;min-width:0">
+      <button id="addAll">Add all to reel</button>
+    </div>
     <div id="cliplist"></div>
     <div class="row" style="margin-top:10px">
-      <button class="go" id="play">Play montage</button>
-      <button id="expEdl">Export EDL (json)</button>
-      <button id="expCsv">Export clip list (csv)</button>
+      <button class="go" id="play">Preview filter results</button>
+      <span style="color:#7d8896">click a clip to jump &middot; <b>+</b> adds it to the reel</span>
     </div>
+  </section>
+
+  <section id="reelSec" hidden>
+    <h2>Reel <span id="reelCount"></span></h2>
+    <div id="reel"></div>
+    <div class="rule"></div>
+    <div class="row">
+      <button class="go" id="playReel">Play reel</button>
+      <button class="go" id="expMp4">Export MP4</button>
+      <button id="expEdl">EDL (json)</button>
+      <button id="expCsv">Clip list (csv)</button>
+      <button id="reelClear">Clear reel</button>
+    </div>
+    <div class="note" id="expStatus">&nbsp;</div>
+    <div class="bar"><i id="expBar"></i></div>
   </section>
 
 </div>
@@ -192,7 +219,7 @@ const S = {
   raw:null, plays:[], rallies:[], teams:{a:'Team A',b:'Team B'},
   labels:{}, video:null, videoDur:0,
   cal:{ anchors:[], sorted:[], fit:'linear', slope:DEFAULT_UNIT, offset:0, from:'uncalibrated' },
-  filt:{},           // facet -> Set of values
+  filt:{}, reel:[], src:'filter',
   clips:[], cur:-1, montage:false
 };
 
@@ -229,7 +256,7 @@ function loadVideo(f){
   const v = $('v');
   if (v.src) URL.revokeObjectURL(v.src);
   v.src = URL.createObjectURL(f);
-  S.video = f;
+  S.video = f; S.mp4 = null;
   v.addEventListener('loadedmetadata', () => { S.videoDur = v.duration; render(); }, { once:true });
 }
 
@@ -849,12 +876,16 @@ function renderClips(){
     host.appendChild(el('div','note','Select at least one filter above to build clips.'));
   }
   S.clips.forEach((c, i) => {
-    const d = el('div','clip' + (i === S.cur ? ' cur' : ''));
+    const d = el('div','clip' + (S.src === 'filter' && i === S.cur ? ' cur' : ''));
     d.appendChild(el('i', null, String(c.n).padStart(3,'0')));
     d.appendChild(el('b', null, clock(c.s)));
     d.appendChild(document.createTextNode(c.label + (c.also ? `  +${c.also} more` : '')));
     d.appendChild(el('u', null, (c.e - c.s).toFixed(1) + 's'));
-    d.onclick = () => { S.cur = i; S.montage = false; seekClip(i); render(); };
+    const plus = el('button', null, '+');
+    plus.title = 'add to reel';
+    plus.onclick = e => { e.stopPropagation(); addToReel([c]); };
+    d.appendChild(plus);
+    d.onclick = () => { S.src = 'filter'; S.cur = i; S.montage = false; seekClip(i); render(); };
     host.appendChild(d);
   });
   const tot = S.clips.reduce((a,c) => a + (c.e - c.s), 0);
@@ -865,27 +896,122 @@ function renderClips(){
 ['window','pre','post','minlen','anchorMode'].forEach(id =>
   $(id).addEventListener('change', render));
 
-/* ── playback ────────────────────────────────────────────── */
+/* ── reel ────────────────────────────────────────────────────
+   The filter answers one question at a time. A montage is several questions in a
+   chosen order, so the reel is a separate ordered list that survives filter
+   changes. Entries store the anchor play, not a timestamp, so recalibrating or
+   changing the window updates every clip already in the reel.                 */
+
+function reelClips(){
+  return S.reel.map((r, i) => {
+    const p = S.plays[r.anchor];
+    const [a, b] = bounds(p, r.mode);
+    let s = vt(a) - r.pre, e = vt(b) + r.post;
+    if (e - s < r.min) e = s + r.min;
+    return { n: i+1, s: Math.max(0, s), e, m: S.plays[r.src], p,
+             rally: p.rally, label: r.label, section: r.section };
+  });
+}
+
+function addToReel(list){
+  const section = ($('secName').value || '').trim() || 'Untitled';
+  const mode = $('window').value, pre = +$('pre').value || 0,
+        post = +$('post').value || 0, min = +$('minlen').value || 0;
+  for (const c of list){
+    if (S.reel.some(r => r.anchor === c.p.i && r.section === section)) continue;
+    S.reel.push({ anchor: c.p.i, src: c.m.i, mode, pre, post, min,
+                  section, label: c.label });
+  }
+  render();
+}
+
+$('addAll').onclick = () => addToReel(S.clips);
+$('reelClear').onclick = () => { S.reel = []; render(); };
+
+function moveSection(name, dir){
+  const order = [...new Set(S.reel.map(r => r.section))];
+  const i = order.indexOf(name), j = i + dir;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  S.reel.sort((a,b) => order.indexOf(a.section) - order.indexOf(b.section));
+  render();
+}
+
+function renderReel(){
+  const host = $('reel'); host.innerHTML = '';
+  const clips = reelClips();
+  $('reelSec').hidden = false;
+
+  if (!clips.length){
+    host.appendChild(el('div','note',
+      'Empty. Filter above, name a section, then use + on individual clips or ' +
+      '"Add all to reel". Build one section at a time \u2014 setter serving, ' +
+      'outside serving, attacks \u2014 and they export in this order.'));
+    $('reelCount').textContent = '';
+    return;
+  }
+
+  const order = [...new Set(clips.map(c => c.section))];
+  for (const name of order){
+    const wrap = el('div','sec');
+    const head = el('header');
+    const rows = clips.filter(c => c.section === name);
+    head.appendChild(el('b', null, `${name} \u00b7 ${rows.length}`));
+    const mk = (txt, fn) => { const b = el('button', null, txt); b.onclick = fn; return b; };
+    head.appendChild(mk('\u2191', () => moveSection(name, -1)));
+    head.appendChild(mk('\u2193', () => moveSection(name, +1)));
+    head.appendChild(mk('\u2715', () => { S.reel = S.reel.filter(r => r.section !== name); render(); }));
+    wrap.appendChild(head);
+
+    rows.forEach(c => {
+      const gi = clips.indexOf(c);
+      const d = el('div','clip' + (S.src === 'reel' && gi === S.cur ? ' cur' : ''));
+      d.appendChild(el('i', null, String(c.n).padStart(3,'0')));
+      d.appendChild(el('b', null, clock(c.s)));
+      const t = el('span', null, c.label);
+      t.style.flex = '1'; t.style.overflow = 'hidden'; t.style.textOverflow = 'ellipsis';
+      t.onclick = () => { S.src = 'reel'; S.cur = gi; S.montage = false; seekClip(gi); render(); };
+      d.appendChild(t);
+      d.appendChild(el('u', null, (c.e - c.s).toFixed(1) + 's'));
+      const rm = el('button', null, '\u2715');
+      rm.onclick = e => { e.stopPropagation();
+        const k = S.reel.findIndex(r => r.anchor === c.p.i && r.section === c.section);
+        if (k >= 0) S.reel.splice(k,1); render(); };
+      d.appendChild(rm);
+      wrap.appendChild(d);
+    });
+    host.appendChild(wrap);
+  }
+  const tot = clips.reduce((a,c) => a + (c.e - c.s), 0);
+  $('reelCount').textContent = `${clips.length} clips \u00b7 ${order.length} sections \u00b7 ${clock(tot)}`;
+}
+
+/* Whichever list playback and export are currently pointed at. */
+const active = () => S.src === 'reel' ? reelClips() : S.clips;
+
 
 const V = $('v');
 
 function seekClip(i){
-  const c = S.clips[i]; if (!c) return;
+  const c = active()[i]; if (!c) return;
   V.currentTime = c.s + (+$('nudge').value || 0);
   $('nowPlaying').textContent = `${String(c.n).padStart(3,'0')}  ${c.label}`;
   V.play().catch(()=>{});
 }
-$('play').onclick = () => { if (!S.clips.length) return; S.montage = true; S.cur = 0; seekClip(0); render(); };
-$('next').onclick = () => { if (S.cur < S.clips.length-1){ S.cur++; seekClip(S.cur); render(); } };
+$('play').onclick = () => { if (!S.clips.length) return;
+  S.src = 'filter'; S.montage = true; S.cur = 0; seekClip(0); render(); };
+$('playReel').onclick = () => { if (!S.reel.length) return;
+  S.src = 'reel'; S.montage = true; S.cur = 0; seekClip(0); render(); };
+$('next').onclick = () => { if (S.cur < active().length-1){ S.cur++; seekClip(S.cur); render(); } };
 $('prev').onclick = () => { if (S.cur > 0){ S.cur--; seekClip(S.cur); render(); } };
 $('stopMon').onclick = () => { S.montage = false; V.pause(); };
 
 V.addEventListener('timeupdate', () => {
   $('vpos').textContent = clock(V.currentTime);
   if (!S.montage) return;
-  const c = S.clips[S.cur];
+  const list = active(), c = list[S.cur];
   if (c && V.currentTime >= c.e){
-    if (S.cur < S.clips.length-1){ S.cur++; seekClip(S.cur); renderClips(); }
+    if (S.cur < list.length-1){ S.cur++; seekClip(S.cur); render(); }
     else { S.montage = false; V.pause(); }
   }
 });
@@ -899,7 +1025,284 @@ document.addEventListener('keydown', e => {
   else if (e.key === '.') V.currentTime += 0.1;
 });
 
-/* ── export ──────────────────────────────────────────────── */
+/* ── mp4 sample table ────────────────────────────────────────
+   Parsed once when the video is loaded. Nothing here reads video payload —
+   only the moov — and the exporter never does either: output samples are
+   assembled from File.slice() Blobs, which stay lazily backed by disk.      */
+
+const fcc = (u,o) => String.fromCharCode(u[o],u[o+1],u[o+2],u[o+3]);
+
+function* mboxes(u8, start, end){
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let off = start;
+  while (off + 8 <= end){
+    let size = dv.getUint32(off), hdr = 8;
+    const type = fcc(u8, off+4);
+    if (size === 1){ size = Number(dv.getBigUint64(off+8)); hdr = 16; }
+    else if (size === 0) size = end - off;
+    if (size < 8 || off + size > end) break;
+    yield { type, start: off, body: off+hdr, end: off+size };
+    off += size;
+  }
+}
+const mfind = (u8, b, t) => { for (const x of mboxes(u8,b.body,b.end)) if (x.type===t) return x; return null; };
+const mall  = (u8, b, t) => { const r=[]; for (const x of mboxes(u8,b.body,b.end)) if (x.type===t) r.push(x); return r; };
+
+async function parseMp4(file){
+  // Locate moov by walking top-level headers only.
+  let off = 0, moovBox = null, hasMdat = false;
+  while (off < file.size){
+    const h = new Uint8Array(await file.slice(off, Math.min(off+16, file.size)).arrayBuffer());
+    if (h.length < 8) break;
+    const dv = new DataView(h.buffer);
+    let size = dv.getUint32(0);
+    const type = fcc(h,4);
+    if (size === 1) size = Number(dv.getBigUint64(8));
+    else if (size === 0) size = file.size - off;
+    if (size < 8) break;
+    if (type === 'moov') moovBox = { start: off, size };
+    if (type === 'mdat') hasMdat = true;
+    if (type === 'moof') return { error: 'fragmented MP4 — not supported by the copy exporter' };
+    off += size;
+  }
+  if (!moovBox) return { error: 'no moov atom' };
+
+  const buf = new Uint8Array(await file.slice(moovBox.start, moovBox.start+moovBox.size).arrayBuffer());
+  const dv  = new DataView(buf.buffer);
+  const moov = { body: 8, end: buf.length };
+
+  let video = null, audioTracks = 0;
+  for (const trak of mall(buf, moov, 'trak')){
+    const mdia = mfind(buf, trak, 'mdia'); if (!mdia) continue;
+    const hdlr = mfind(buf, mdia, 'hdlr');
+    const kind = hdlr ? fcc(buf, hdlr.body+8) : '';
+    if (kind === 'soun'){ audioTracks++; continue; }
+    if (kind !== 'vide' || video) continue;
+
+    const mdhd = mfind(buf, mdia, 'mdhd');
+    const mv = buf[mdhd.body], mp = mdhd.body+4;
+    const timescale = mv === 1 ? dv.getUint32(mp+16) : dv.getUint32(mp+8);
+
+    const stbl = mfind(buf, mfind(buf, mdia, 'minf'), 'stbl');
+    const stsz = mfind(buf,stbl,'stsz'), stts = mfind(buf,stbl,'stts');
+    const stsc = mfind(buf,stbl,'stsc'), stss = mfind(buf,stbl,'stss');
+    const stco = mfind(buf,stbl,'stco'), co64 = mfind(buf,stbl,'co64');
+    const ctts = mfind(buf,stbl,'ctts'), stsd = mfind(buf,stbl,'stsd');
+
+    const uniform = dv.getUint32(stsz.body+4);
+    const n = dv.getUint32(stsz.body+8);
+    const size = new Uint32Array(n);
+    if (uniform) size.fill(uniform);
+    else for (let i=0;i<n;i++) size[i] = dv.getUint32(stsz.body+12+i*4);
+
+    const dts = new Float64Array(n), dur = new Uint32Array(n);
+    { const ne = dv.getUint32(stts.body+4); let s=0, acc=0;
+      for (let i=0;i<ne;i++){
+        const c = dv.getUint32(stts.body+8+i*8), d = dv.getUint32(stts.body+12+i*8);
+        for (let j=0;j<c && s<n;j++){ dts[s]=acc; dur[s]=d; acc+=d; s++; }
+      } }
+
+    const sync = new Uint8Array(n);
+    if (!stss) sync.fill(1);
+    else { const ne = dv.getUint32(stss.body+4);
+      for (let i=0;i<ne;i++){ const s = dv.getUint32(stss.body+8+i*4); if (s>=1&&s<=n) sync[s-1]=1; } }
+
+    let cts = null;
+    if (ctts){ cts = new Int32Array(n); const ne = dv.getUint32(ctts.body+4); let s=0;
+      for (let i=0;i<ne;i++){ const c = dv.getUint32(ctts.body+8+i*8), o = dv.getInt32(ctts.body+12+i*8);
+        for (let j=0;j<c && s<n;j++) cts[s++] = o; } }
+
+    // Chunk offsets, then walk chunks to assign a byte offset to every sample.
+    const co = co64 || stco, wide = !!co64;
+    const nc = dv.getUint32(co.body+4);
+    const chunks = new Float64Array(nc);
+    for (let i=0;i<nc;i++) chunks[i] = wide
+      ? Number(dv.getBigUint64(co.body+8+i*8)) : dv.getUint32(co.body+8+i*4);
+
+    const nsc = dv.getUint32(stsc.body+4);
+    const sc = [];
+    for (let i=0;i<nsc;i++) sc.push({
+      first: dv.getUint32(stsc.body+8+i*12),
+      per:   dv.getUint32(stsc.body+12+i*12) });
+
+    const off2 = new Float64Array(n);
+    { let s=0, e=0;
+      for (let c=0;c<nc && s<n;c++){
+        while (e+1 < sc.length && sc[e+1].first <= c+1) e++;
+        let o = chunks[c];
+        for (let k=0;k<sc[e].per && s<n;k++){ off2[s]=o; o+=size[s]; s++; }
+      } }
+
+    const entry = [...mboxes(buf, stsd.body+8, stsd.end)][0];
+    video = { timescale, n, size, dts, dur, sync, cts, off: off2,
+      width: dv.getUint16(entry.start+32), height: dv.getUint16(entry.start+34),
+      sampleEntry: buf.slice(entry.start, entry.end), format: entry.type };
+  }
+  if (!video) return { error: 'no video track' };
+  return { video, audioTracks, file };
+}
+
+/* ── mp4 writer ──────────────────────────────────────────── */
+
+const B = {
+  u8:  n => new Uint8Array([n & 255]),
+  u16: n => new Uint8Array([n>>8&255, n&255]),
+  u32: n => new Uint8Array([n>>>24&255, n>>>16&255, n>>>8&255, n&255]),
+  u64: n => new Uint8Array([...B.u32(Math.floor(n/2**32)), ...B.u32(n>>>0)]),
+  s4:  s => new Uint8Array([...s].map(c => c.charCodeAt(0)))
+};
+function cat(...p){
+  const parts = p.flat();
+  const len = parts.reduce((a,x) => a+x.length, 0);
+  const out = new Uint8Array(len);
+  let o = 0; parts.forEach(x => { out.set(x,o); o += x.length; });
+  return out;
+}
+const box  = (t, ...p) => { const b = cat(...p); return cat(B.u32(b.length+8), B.s4(t), b); };
+const fbox = (t, ver, flags, ...p) => box(t, new Uint8Array([ver, flags>>16&255, flags>>8&255, flags&255]), ...p);
+
+const MATRIX = cat(B.u32(0x10000),B.u32(0),B.u32(0),B.u32(0),B.u32(0x10000),
+                   B.u32(0),B.u32(0),B.u32(0),B.u32(0x40000000));
+
+function buildMoov(v, sel, chunkOffsets){
+  // Run-length the timing and chunk tables the way the spec expects.
+  const stts = [];
+  sel.dur.forEach(d => { const l = stts[stts.length-1];
+    if (l && l.d === d) l.c++; else stts.push({ c:1, d }); });
+  const stsc = [];
+  sel.perChunk.forEach((per,i) => { const l = stsc[stsc.length-1];
+    if (!l || l.per !== per) stsc.push({ first:i+1, per }); });
+
+  const mediaDur = sel.dur.reduce((a,b) => a+b, 0);
+  const movieTs  = 1000;
+  const movieDur = Math.round(mediaDur / v.timescale * movieTs);
+
+  const stblParts = [
+    box('stsd', new Uint8Array([0,0,0,0]), B.u32(1), v.sampleEntry),
+    fbox('stts',0,0, B.u32(stts.length), cat(stts.map(e => cat(B.u32(e.c), B.u32(e.d))))),
+    fbox('stsc',0,0, B.u32(stsc.length),
+         cat(stsc.map(e => cat(B.u32(e.first), B.u32(e.per), B.u32(1))))),
+    fbox('stsz',0,0, B.u32(0), B.u32(sel.size.length), cat(sel.size.map(B.u32))),
+    fbox('co64',0,0, B.u32(chunkOffsets.length), cat(chunkOffsets.map(B.u64)))
+  ];
+  const syncNums = [];
+  sel.sync.forEach((s,i) => { if (s) syncNums.push(i+1); });
+  if (syncNums.length !== sel.size.length)
+    stblParts.splice(4, 0, fbox('stss',0,0, B.u32(syncNums.length), cat(syncNums.map(B.u32))));
+  if (sel.cts){
+    const ct = [];
+    sel.cts.forEach(o => { const l = ct[ct.length-1];
+      if (l && l.o === o) l.c++; else ct.push({ c:1, o }); });
+    stblParts.push(fbox('ctts',0,0, B.u32(ct.length),
+      cat(ct.map(e => cat(B.u32(e.c), B.u32(e.o))))));
+  }
+
+  return box('moov',
+    fbox('mvhd',0,0, B.u32(0), B.u32(0), B.u32(movieTs), B.u32(movieDur),
+         B.u32(0x10000), B.u16(0x100), B.u16(0), B.u32(0), B.u32(0),
+         MATRIX, cat(Array(6).fill(B.u32(0))), B.u32(2)),
+    box('trak',
+      fbox('tkhd',0,3, B.u32(0), B.u32(0), B.u32(1), B.u32(0), B.u32(movieDur),
+           B.u32(0), B.u32(0), B.u16(0), B.u16(0), B.u16(0), B.u16(0), MATRIX,
+           B.u32(v.width<<16), B.u32(v.height<<16)),
+      box('mdia',
+        fbox('mdhd',0,0, B.u32(0), B.u32(0), B.u32(v.timescale), B.u32(mediaDur),
+             B.u16(0x55c4), B.u16(0)),
+        fbox('hdlr',0,0, B.u32(0), B.s4('vide'), B.u32(0), B.u32(0), B.u32(0),
+             cat(B.s4('VideoHandler'), new Uint8Array([0]))),
+        box('minf',
+          fbox('vmhd',0,1, B.u16(0), B.u16(0), B.u16(0), B.u16(0)),
+          box('dinf', fbox('dref',0,0, B.u32(1), fbox('url ',0,1))),
+          box('stbl', ...stblParts)))));
+}
+
+/* Map a clip's time window to a sample range, snapping the start back to the
+   nearest preceding sync sample — the reason a short GOP matters. */
+function clipSamples(v, startSec, endSec){
+  const t0 = startSec * v.timescale, t1 = endSec * v.timescale;
+  let a = 0, b = v.n - 1;
+  for (let i = 0; i < v.n; i++){ if (v.dts[i] > t0) break; a = i; }
+  while (a > 0 && !v.sync[a]) a--;
+  for (let i = a; i < v.n; i++){ b = i; if (v.dts[i] >= t1) break; }
+  return [a, b];
+}
+
+async function exportMp4(clips, onProgress){
+  const M = S.mp4;
+  if (!M || M.error) throw new Error(M?.error || 'video not parsed');
+  const v = M.video;
+
+  const sel = { size:[], dur:[], sync:[], cts: v.cts ? [] : null, perChunk:[] };
+  const runs = [];                              // contiguous source byte ranges
+  let outPos = 0;
+  const chunkOffsets = [];                      // one chunk per clip
+  const placed = [];
+
+  clips.forEach((c, ci) => {
+    const [a,b] = clipSamples(v, c.s, c.e);
+    chunkOffsets.push(outPos);
+    sel.perChunk.push(b - a + 1);
+    placed.push({ n: ci+1, actualStart: v.dts[a]/v.timescale,
+                  actualEnd: (v.dts[b]+v.dur[b])/v.timescale, label: c.label });
+    for (let i = a; i <= b; i++){
+      sel.size.push(v.size[i]); sel.dur.push(v.dur[i]); sel.sync.push(v.sync[i]);
+      if (sel.cts) sel.cts.push(v.cts[i]);
+      const last = runs[runs.length-1];
+      if (last && last.end === v.off[i]) last.end += v.size[i];
+      else runs.push({ start: v.off[i], end: v.off[i] + v.size[i] });
+      outPos += v.size[i];
+    }
+    onProgress?.((ci+1)/clips.length);
+  });
+
+  const ftyp = box('ftyp', B.s4('isom'), B.u32(0x200),
+                   B.s4('isom'), B.s4('iso2'), B.s4('avc1'), B.s4('mp41'));
+
+  // co64 is fixed-width, so the moov length does not change when offsets are
+  // filled in — build once to measure, once for real.
+  const probe = buildMoov(v, sel, chunkOffsets.map(() => 0));
+  const mdatStart = ftyp.length + probe.length;
+  const mdatHdr = outPos + 8 > 0xFFFFFFFF
+    ? cat(B.u32(1), B.s4('mdat'), B.u64(outPos + 16))
+    : cat(B.u32(outPos + 8), B.s4('mdat'));
+  const base = mdatStart + mdatHdr.length;
+  const moov = buildMoov(v, sel, chunkOffsets.map(o => o + base));
+  if (moov.length !== probe.length) throw new Error('moov length unstable');
+
+  // Blob slices are lazily backed by the file — no video payload enters memory.
+  const parts = [ftyp, moov, mdatHdr, ...runs.map(r => M.file.slice(r.start, r.end))];
+  return { blob: new Blob(parts, { type:'video/mp4' }), placed, bytes: outPos };
+}
+
+$('expMp4').onclick = async () => {
+  const clips = active();
+  if (!clips.length || !S.video) return;
+  const status = t => { $('expStatus').textContent = t; };
+  const bar = p => { $('expBar').style.width = Math.round(p*100) + '%'; };
+  $('expMp4').disabled = true;
+  try {
+    if (!S.mp4){ status('Reading sample table\u2026'); bar(0.05); S.mp4 = await parseMp4(S.video); }
+    if (S.mp4.error) throw new Error(S.mp4.error);
+    status(`Assembling ${clips.length} clips\u2026`);
+    const { blob, placed, bytes } = await exportMp4(clips, p => bar(0.05 + p*0.9));
+
+    const name = (S.file?.name || 'montage').replace(/\.[^.]+$/,'') +
+                 (S.src === 'reel' ? '-reel' : '-filter') + '.mp4';
+    const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+
+    // Report how far each in-point slid back to reach an IDR.
+    const snap = placed.map((p,i) => clips[i].s - p.actualStart);
+    const worst = Math.max(...snap);
+    const dur = placed.reduce((s,p) => s + (p.actualEnd - p.actualStart), 0);
+    bar(1);
+    status(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
+      `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy, no re-encode \u00b7 ` +
+      `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in`);
+  } catch (err){
+    status('Export failed: ' + (err.message || err)); bar(0); console.error(err);
+  } finally { $('expMp4').disabled = false; }
+};
 
 function save(name, text, mime){
   const b = new Blob([text], { type: mime || 'application/json' });
@@ -914,15 +1317,16 @@ $('expEdl').onclick = () => save('montage.edl.json', JSON.stringify({
                  fit: S.cal.fit, anchors: S.cal.anchors },
   filter: Object.fromEntries(Object.entries(S.filt).map(([k,v]) => [k, [...v]])),
   window: { mode: $('window').value, pre: +$('pre').value, post: +$('post').value },
-  clips: S.clips.map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
+  reel: S.reel,
+  clips: active().map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
     duration: +(c.e-c.s).toFixed(3), label: c.label, set: c.m.set, rally: c.rally,
     team: c.m.team, player: c.m.player, skill: c.m.skill,
     combination: c.m.combination, effect: c.m.effect }))
 }, null, 2));
 
 $('expCsv').onclick = () => {
-  const rows = [['n','start','end','duration','set','team','player','skill','combination','effect','label']];
-  S.clips.forEach(c => rows.push([c.n, c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
+  const rows = [['n','section','start','end','duration','set','team','player','skill','combination','effect','label']];
+  active().forEach(c => rows.push([c.n, c.section||'', c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
     c.m.set, c.m.team, c.m.player, c.m.skill, c.m.combination||'', c.m.effect||'',
     '"'+c.label.replace(/"/g,'""')+'"']));
   save('montage.csv', rows.map(r => r.join(',')).join('\n'), 'text/csv');
@@ -986,6 +1390,7 @@ function render(){
     : '';
   buildClips();
   renderClips();
+  renderReel();
 }
 
 recalc(); render();
