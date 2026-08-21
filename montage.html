@@ -1349,8 +1349,50 @@ async function encodeTitle(title, sub, v, frameDur, seconds){
   if (!description) throw new Error('encoder returned no avcC — cannot build a sample entry');
   return { frames, description };
 }
+/* ── in-band parameter sets ──────────────────────────────────
+   A decoder configures itself from the first sample entry and does not
+   reconfigure mid-track, so a card encoded with different SPS/PPS gets dropped.
+   The fix is to carry parameter sets in the bitstream: prepend the source's
+   SPS/PPS to each clip's keyframe and the card's own to each card, so whatever
+   played last, the decoder is re-armed correctly before the next segment.    */
+
+function avcCOf(entry){
+  for (let i = 0; i + 8 < entry.length; i++){
+    if (entry[i+4]===0x61 && entry[i+5]===0x76 && entry[i+6]===0x63 && entry[i+7]===0x43){
+      const size = ((entry[i]<<24)|(entry[i+1]<<16)|(entry[i+2]<<8)|entry[i+3])>>>0;
+      return entry.subarray(i+8, i+size);
+    }
+  }
+  return null;
+}
+
+/* Build the length-prefixed SPS/PPS NAL units an AVCC-format sample expects. */
+function paramPrefix(avcC){
+  if (!avcC || avcC.length < 7) return null;
+  const lengthSize = (avcC[4] & 3) + 1;
+  const nals = [];
+  let o = 5;
+  const nSPS = avcC[o++] & 0x1f;
+  for (let i = 0; i < nSPS && o+2 <= avcC.length; i++){
+    const L = (avcC[o]<<8) | avcC[o+1]; o += 2;
+    nals.push(avcC.subarray(o, o+L)); o += L;
+  }
+  const nPPS = avcC[o++];
+  for (let i = 0; i < nPPS && o+2 <= avcC.length; i++){
+    const L = (avcC[o]<<8) | avcC[o+1]; o += 2;
+    nals.push(avcC.subarray(o, o+L)); o += L;
+  }
+  if (!nals.length) return null;
+  const parts = [];
+  for (const n of nals){
+    const L = new Uint8Array(lengthSize);
+    for (let i = 0; i < lengthSize; i++) L[lengthSize-1-i] = (n.length >> (8*i)) & 255;
+    parts.push(L, n);
+  }
+  return { bytes: cat(parts), lengthSize };
+}
 /* Re-parse the file we just wrote. A Blob exposes .slice and .size, so the same
-   reader works on it — this answers "are the cards actually in the file?" without
+   reader works on it — this answers "is it actually in the file?" without
    depending on how any given player behaves. */
 async function verifyMp4(blob){
   const rd = async (a,b) => new Uint8Array(await blob.slice(a,b).arrayBuffer());
@@ -1423,7 +1465,7 @@ async function exportMp4(clips, onProgress, opts){
 
   // One card per section, encoded up front.
   const cards = {};
-  let titleEntry = null, cardError = null;
+  let cardError = null, cardPrefix = null;
   if (opts.titles){
     const names = [];
     clips.forEach(c => { if (c.section && !names.includes(c.section)) names.push(c.section); });
@@ -1435,47 +1477,68 @@ async function exportMp4(clips, onProgress, opts){
       } catch (e){ cardError = e.message || String(e); break; }
     }
     const first = cards[names[0]];
-    if (first) titleEntry = avc1Entry(v.width, v.height, first.description);
+    if (first) cardPrefix = paramPrefix(first.description);
+    if (first && !cardPrefix) cardError = 'encoder returned no usable SPS/PPS';
   }
 
+  // Source parameter sets, re-asserted before every footage clip so a preceding
+  // card cannot leave the decoder configured with the wrong ones.
+  const srcPrefix = paramPrefix(avcCOf(v.sampleEntry));
+  const useCards = cardPrefix && srcPrefix &&
+                   cardPrefix.lengthSize === srcPrefix.lengthSize && !cardError;
+  if (cardPrefix && srcPrefix && cardPrefix.lengthSize !== srcPrefix.lengthSize)
+    cardError = 'NAL length size differs between source and encoder';
+
   const sel = { size:[], dur:[], sync:[], cts: v.cts ? [] : null, perChunk:[], desc:[] };
-  const parts = [];                             // output byte order: Blob slices and card bytes
+  const parts = [];                             // output byte order: Blob slices and inline bytes
   let run = null, outPos = 0;
   const chunkOffsets = [];
   const placed = [];
   const flushRun = () => { if (run){ parts.push(M.file.slice(run.start, run.end)); run = null; } };
 
-  let lastSection = null;
-  clips.forEach((c, ci) => {
-    if (titleEntry && c.section && c.section !== lastSection && cards[c.section]){
+  let lastSection = null, ci = 0;
+  for (const c of clips){
+    if (useCards && c.section && c.section !== lastSection && cards[c.section]){
       flushRun();
       const card = cards[c.section];
       chunkOffsets.push(outPos);
       sel.perChunk.push(card.frames.length);
-      sel.desc.push(2);                         // the generated sample entry
-      card.frames.forEach(f => {
-        sel.size.push(f.data.length); sel.dur.push(frameDur); sel.sync.push(f.key ? 1 : 0);
+      sel.desc.push(1);
+      card.frames.forEach((f, k) => {
+        const data = k === 0 ? cat(cardPrefix.bytes, f.data) : f.data;
+        sel.size.push(data.length); sel.dur.push(frameDur); sel.sync.push(f.key ? 1 : 0);
         if (sel.cts) sel.cts.push(0);
-        parts.push(f.data); outPos += f.data.length;
+        parts.push(data); outPos += data.length;
       });
     }
     lastSection = c.section;
 
     const [a,b] = clipSamples(v, c.s, c.e);
+    flushRun();
     chunkOffsets.push(outPos);
     sel.perChunk.push(b - a + 1);
-    sel.desc.push(1);                           // the source sample entry, untouched
-    placed.push({ n: ci+1, actualStart: v.dts[a]/v.timescale,
+    sel.desc.push(1);
+    placed.push({ n: ++ci, actualStart: v.dts[a]/v.timescale,
                   actualEnd: (v.dts[b]+v.dur[b])/v.timescale, label: c.label });
+
     for (let i = a; i <= b; i++){
-      sel.size.push(v.size[i]); sel.dur.push(v.dur[i]); sel.sync.push(v.sync[i]);
+      if (i === a && useCards){
+        // Rewrite only this one frame, with the source parameter sets in front.
+        const raw = new Uint8Array(await M.file.slice(v.off[i], v.off[i] + v.size[i]).arrayBuffer());
+        const data = cat(srcPrefix.bytes, raw);
+        sel.size.push(data.length);
+        parts.push(data); outPos += data.length;
+      } else {
+        sel.size.push(v.size[i]);
+        if (run && run.end === v.off[i]) run.end += v.size[i];
+        else { flushRun(); run = { start: v.off[i], end: v.off[i] + v.size[i] }; }
+        outPos += v.size[i];
+      }
+      sel.dur.push(v.dur[i]); sel.sync.push(v.sync[i]);
       if (sel.cts) sel.cts.push(v.cts[i]);
-      if (run && run.end === v.off[i]) run.end += v.size[i];
-      else { flushRun(); run = { start: v.off[i], end: v.off[i] + v.size[i] }; }
-      outPos += v.size[i];
     }
-    if (onProgress) onProgress((ci+1)/clips.length);
-  });
+    if (onProgress) onProgress(ci/clips.length);
+  }
   flushRun();
 
   const ftyp = box('ftyp', B.s4('isom'), B.u32(0x200),
@@ -1483,19 +1546,20 @@ async function exportMp4(clips, onProgress, opts){
 
   // co64 is fixed-width, so the moov length does not change when offsets are
   // filled in — build once to measure, once for real.
-  const probe = buildMoov(v, sel, chunkOffsets.map(() => 0), titleEntry);
+  const probe = buildMoov(v, sel, chunkOffsets.map(() => 0));
   const mdatStart = ftyp.length + probe.length;
   const mdatHdr = outPos + 8 > 0xFFFFFFFF
     ? cat(B.u32(1), B.s4('mdat'), B.u64(outPos + 16))
     : cat(B.u32(outPos + 8), B.s4('mdat'));
   const base = mdatStart + mdatHdr.length;
-  const moov = buildMoov(v, sel, chunkOffsets.map(o => o + base), titleEntry);
+  const moov = buildMoov(v, sel, chunkOffsets.map(o => o + base));
   if (moov.length !== probe.length) throw new Error('moov length unstable');
 
   // Blob slices stay lazily backed by the file — no footage enters memory.
   return { blob: new Blob([ftyp, moov, mdatHdr, ...parts], { type:'video/mp4' }),
-           placed, bytes: outPos, cards: Object.keys(cards).length,
-           cardFrames: Object.values(cards).reduce((a,c)=>a+c.frames.length,0), cardError };
+           placed, bytes: outPos,
+           cardFrames: useCards ? Object.values(cards).reduce((a,c)=>a+c.frames.length,0) : 0,
+           cards: useCards ? Object.keys(cards).length : 0, cardError };
 }
 
 $('expMp4').onclick = async () => {
