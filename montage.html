@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>montage</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b23; --line:#242c38; --line2:#2f3a48;
+    --ink:#d7dee8; --dim:#7d8896; --key:#8fd0ff;
+    --ok:#5fd68a; --warn:#e8c05a; --bad:#f0736a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:18px}
+  h1{font-size:15px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+     color:var(--dim);margin:0 0 14px}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+          padding:13px 15px;margin-bottom:14px}
+  section>h2{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--key);
+             margin:0 0 10px;font-weight:600;display:flex;justify-content:space-between;
+             align-items:center;gap:10px}
+  section>h2 span{color:var(--dim);letter-spacing:0;text-transform:none;font-weight:400}
+  .wrap{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:14px;
+        align-items:start;max-width:1500px;margin-inline:auto}
+  @media(max-width:1000px){.wrap{grid-template-columns:1fr}}
+  .right{position:sticky;top:18px}
+
+  button,select,input[type=number],input[type=text]{
+    font:inherit;background:#1c242e;color:var(--ink);border:1px solid var(--line2);
+    border-radius:4px;padding:4px 9px;cursor:pointer}
+  button:hover{border-color:var(--key)}
+  button:disabled{opacity:.35;cursor:default}
+  button.go{background:#1b3a52;border-color:#2f6d96;color:#cfe8fb}
+  input[type=number]{width:64px;cursor:text}
+  label.f{display:inline-flex;gap:5px;align-items:center;color:var(--dim);margin-right:12px}
+
+  .chips{display:flex;flex-wrap:wrap;gap:5px}
+  .chip{border:1px solid var(--line2);border-radius:3px;padding:2px 7px;font-size:12px;
+        background:#1a212b;color:var(--dim);cursor:pointer;user-select:none;white-space:nowrap}
+  .chip:hover{border-color:var(--key)}
+  .chip.on{background:#1b3a52;border-color:#3f7fa8;color:#d6ecfb}
+  .chip small{color:#5d6b7c;margin-left:4px}
+  .chip.on small{color:#87b4d0}
+  .grp{margin-bottom:9px}
+  .grp>b{display:block;font-weight:400;color:var(--dim);font-size:11px;
+         letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px}
+
+  video{width:100%;background:#000;border-radius:4px;display:block}
+  .drop{border:1px dashed var(--line2);border-radius:5px;padding:16px;text-align:center;
+        color:var(--dim);cursor:pointer;background:#12181f}
+  .drop:hover,.drop.hot{border-color:var(--key);color:var(--ink)}
+  .drop input{display:none}
+
+  table{border-collapse:collapse;width:100%;font-size:12px}
+  td{padding:2px 8px 2px 0}
+  td:first-child{color:var(--dim);white-space:nowrap;width:1%}
+
+  #cliplist{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:4px}
+  .clip{padding:5px 9px;border-bottom:1px solid var(--line);cursor:pointer;
+        display:flex;gap:9px;align-items:baseline;font-size:12px}
+  .clip:last-child{border-bottom:0}
+  .clip:hover{background:#1b232d}
+  .clip.cur{background:#1b3a52}
+  .clip i{color:var(--dim);font-style:normal;width:34px;flex:none}
+  .clip b{font-weight:600;color:var(--key);flex:none}
+  .clip u{text-decoration:none;color:var(--dim);margin-left:auto;flex:none}
+
+  .note{color:var(--dim);font-size:12px;margin:8px 0 0}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  .rule{height:1px;background:var(--line);margin:11px 0}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  kbd{border:1px solid var(--line2);border-radius:3px;padding:0 4px;color:var(--dim);font-size:11px}
+</style>
+</head>
+<body>
+
+<h1>Montage</h1>
+
+<div class="wrap">
+<div class="left">
+
+  <section>
+    <h2>Files</h2>
+    <label class="drop" id="drop">
+      <input type="file" multiple accept=".vsm,.json,.mp4,.mov,.m4v">
+      Drop the .vsm and the .mp4 — or click to pick
+    </label>
+    <table id="finfo" style="margin-top:10px"></table>
+  </section>
+
+  <section id="calSec" hidden>
+    <h2>Calibration <span id="calState"></span></h2>
+    <div class="note" id="calHelp">
+      Pick a play, seek the video to the exact contact, then set it as an anchor.
+      Two anchors far apart derive both the offset and the time unit.
+    </div>
+    <div class="rule"></div>
+    <div class="row">
+      <select id="calPick" style="flex:1;min-width:0"></select>
+      <button id="calSeek">Seek to estimate</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="calA">Set anchor A</button>
+      <button id="calB">Set anchor B</button>
+      <button id="calClear">Clear</button>
+    </div>
+    <table id="calOut" style="margin-top:10px"></table>
+  </section>
+
+  <section id="filtSec" hidden>
+    <h2>Filter <span id="filtCount"></span></h2>
+    <div id="filters"></div>
+    <div class="rule"></div>
+    <div class="row">
+      <label class="f">Anchor on
+        <select id="anchorMode">
+          <option value="self">the matched touch</option>
+          <option value="attack">the attack that followed</option>
+        </select>
+      </label>
+      <button id="clearFilt">Clear all</button>
+    </div>
+    <div class="note" id="anchorNote"></div>
+  </section>
+
+  <section id="clipSec" hidden>
+    <h2>Clips <span id="clipCount"></span></h2>
+    <div class="row">
+      <label class="f">Window
+        <select id="window">
+          <option value="phase">phase</option>
+          <option value="touch">touch</option>
+          <option value="rally">rally</option>
+        </select>
+      </label>
+      <label class="f">Lead-in <input type="number" id="pre" value="2.0" step="0.5" min="0"></label>
+      <label class="f">Tail <input type="number" id="post" value="3.0" step="0.5" min="0"></label>
+      <label class="f">Min <input type="number" id="minlen" value="4" step="1" min="1"></label>
+    </div>
+    <div class="rule"></div>
+    <div id="cliplist"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="go" id="play">Play montage</button>
+      <button id="expEdl">Export EDL (json)</button>
+      <button id="expCsv">Export clip list (csv)</button>
+    </div>
+  </section>
+
+</div>
+<div class="right">
+  <section>
+    <h2>Video <span id="vpos"></span></h2>
+    <video id="v" controls preload="metadata"></video>
+    <div class="row" style="margin-top:9px">
+      <button id="prev">&#8592; Prev</button>
+      <button id="next">Next &#8594;</button>
+      <button id="stopMon">Stop montage</button>
+      <label class="f" style="margin-left:auto">Nudge
+        <input type="number" id="nudge" value="0" step="0.1" style="width:70px">
+      </label>
+    </div>
+    <div class="note" id="nowPlaying">&nbsp;</div>
+    <div class="note"><kbd>space</kbd> play/pause &nbsp; <kbd>&#8592;</kbd><kbd>&#8594;</kbd> clip &nbsp;
+      <kbd>,</kbd><kbd>.</kbd> nudge 0.1&#8202;s</div>
+  </section>
+</div>
+</div>
+
+<script>
+'use strict';
+
+/* ── constants ───────────────────────────────────────────── */
+
+const SKILL = { S:'Serve', R:'Reception', E:'Set', A:'Attack', B:'Block', D:'Dig', F:'Freeball' };
+const SKILL_ORDER = ['S','R','E','A','B','D','F'];
+const EFFECT = {
+  '#':'perfect / kill', '+':'positive', '!':'ok', '-':'poor', '/':'blocked / over', '=':'error'
+};
+const DEFAULT_UNIT = 0.1;   // deciseconds, pending calibration
+
+/* ── state ───────────────────────────────────────────────── */
+
+const S = {
+  raw:null, plays:[], rallies:[], teams:{a:'Team A',b:'Team B'},
+  labels:{}, video:null, videoDur:0,
+  cal:{ A:null, B:null, slope:DEFAULT_UNIT, offset:0, from:'assumed' },
+  filt:{},           // facet -> Set of values
+  clips:[], cur:-1, montage:false
+};
+
+const $  = id => document.getElementById(id);
+const el = (tag, cls, txt) => { const e = document.createElement(tag);
+  if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+const clock = s => { s = Math.max(0, s||0);
+  const m = Math.floor(s/60), x = s%60;
+  return `${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}:${x.toFixed(1).padStart(4,'0')}`; };
+const bytes = n => n < 1e9 ? (n/1e6).toFixed(1)+' MB' : (n/1e9).toFixed(2)+' GB';
+
+/* ── file loading ────────────────────────────────────────── */
+
+const drop = $('drop');
+drop.querySelector('input').addEventListener('change', e => load([...e.target.files]));
+['dragover','dragenter'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', e => { e.preventDefault(); load([...e.dataTransfer.files]); });
+
+async function load(files){
+  for (const f of files){
+    const ext = f.name.split('.').pop().toLowerCase();
+    try {
+      if (['mp4','mov','m4v'].includes(ext)) loadVideo(f);
+      else                                   await loadVsm(f);
+    } catch(err){ alert(`${f.name}: ${err.message||err}`); }
+  }
+  render();
+}
+
+function loadVideo(f){
+  const v = $('v');
+  if (v.src) URL.revokeObjectURL(v.src);
+  v.src = URL.createObjectURL(f);
+  S.video = f;
+  v.addEventListener('loadedmetadata', () => { S.videoDur = v.duration; render(); }, { once:true });
+}
+
+/* Read code→label tables defensively; VolleyStation field names vary by version. */
+function codeTable(arr){
+  const m = {};
+  (arr||[]).forEach(o => {
+    if (!o || typeof o !== 'object') return;
+    const code = o.code ?? o.combination ?? o.symbol ?? o.id ?? o.key;
+    const name = o.name ?? o.description ?? o.label ?? o.text ?? o.title;
+    if (code) m[code] = name || code;
+  });
+  return m;
+}
+
+async function loadVsm(f){
+  let txt = await f.text();
+  if (txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);
+  const d = JSON.parse(txt);
+  S.raw = d; S.file = f;
+
+  S.labels = Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls));
+
+  const roster = {};
+  for (const side of ['home','away']){
+    const t = (d.team||{})[side];
+    if (!t) continue;
+    S.teams[side === 'home' ? 'a' : 'b'] = t.name || t.code || side;
+    (t.players||[]).forEach(p => {
+      const num = String(p.number ?? p.shirtNumber ?? p.shirt ?? '').padStart(2,'0');
+      const nm  = [p.firstName, p.lastName].filter(Boolean).join(' ') || p.name || '';
+      roster[(side === 'home' ? 'a' : 'b') + num] = nm;
+    });
+  }
+  S.roster = roster;
+
+  const plays = [], rallies = [];
+  (d.scout?.sets || []).forEach((st, si) => {
+    (st.events || []).forEach(ev => {
+      const ps = ev.exchange?.plays;
+      if (!ps || !ps.length) return;              // skip timeouts, subs, non-rally events
+      const rid = rallies.length;
+      const first = plays.length;
+      ps.forEach((p, k) => {
+        plays.push({
+          i: plays.length, rally: rid, seq: k, set: si+1,
+          team: p.team, player: String(p.player ?? ''),
+          skill: p.skill, hitType: p.hitType, effect: p.effect,
+          combination: p.combination, raw: p.time
+        });
+      });
+      rallies.push({ id: rid, set: si+1, first, last: plays.length-1 });
+    });
+  });
+  if (!plays.length) throw new Error('no plays found under scout.sets[].events[].exchange.plays[]');
+
+  S.plays = plays; S.rallies = rallies;
+  S.rawMin = Math.min(...plays.map(p => p.raw));
+  S.cal.offset = 0;
+  S.filt = {};
+}
+
+/* ── time mapping ────────────────────────────────────────── */
+
+const vt = p => S.cal.offset + (p.raw - S.rawMin) * S.cal.slope;
+
+function recalc(){
+  const { A, B } = S.cal;
+  if (A && B && A.raw !== B.raw){
+    S.cal.slope  = (B.v - A.v) / (B.raw - A.raw);
+    S.cal.offset = A.v - (A.raw - S.rawMin) * S.cal.slope;
+    S.cal.from   = 'two anchors';
+  } else if (A){
+    S.cal.slope  = DEFAULT_UNIT;
+    S.cal.offset = A.v - (A.raw - S.rawMin) * DEFAULT_UNIT;
+    S.cal.from   = 'one anchor, unit assumed';
+  } else {
+    S.cal.slope  = DEFAULT_UNIT;
+    S.cal.offset = 0;
+    S.cal.from   = 'uncalibrated';
+  }
+}
+
+function describe(p){
+  const num = p.player ? '#' + p.player.replace(/^0+(?=\d)/,'') : '';
+  const combo = p.combination ? ' ' + p.combination : '';
+  return `S${p.set} · ${S.teams[p.team]||p.team} ${num} ${SKILL[p.skill]||p.skill}${combo} ${p.effect||''}`;
+}
+
+/* ── calibration UI ──────────────────────────────────────── */
+
+$('calSeek').onclick = () => {
+  const p = S.plays[+$('calPick').value];
+  if (p) { $('v').currentTime = Math.max(0, vt(p)); }
+};
+$('calA').onclick = () => setAnchor('A');
+$('calB').onclick = () => setAnchor('B');
+$('calClear').onclick = () => { S.cal.A = S.cal.B = null; recalc(); render(); };
+
+function setAnchor(which){
+  const p = S.plays[+$('calPick').value];
+  if (!p) return;
+  S.cal[which] = { raw: p.raw, v: $('v').currentTime, label: describe(p) };
+  recalc(); render();
+}
+
+function renderCal(){
+  const sel = $('calPick');
+  if (sel.options.length !== S.plays.length){
+    sel.innerHTML = '';
+    // Serves are the cleanest anchors: unambiguous single moment of contact.
+    S.plays.forEach(p => {
+      const o = el('option', null, `${describe(p)}  \u2014 est ${clock(vt(p))}`);
+      o.value = p.i;
+      if (p.skill !== 'S') o.style.color = '#7d8896';
+      sel.appendChild(o);
+    });
+  }
+
+  const t = $('calOut'); t.innerHTML = '';
+  const add = (k, v, cls) => { const r = t.insertRow();
+    r.insertCell().textContent = k;
+    const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
+
+  for (const w of ['A','B']){
+    const a = S.cal[w];
+    add('anchor ' + w, a ? `${clock(a.v)} \u2014 ${a.label}` : '<span style="color:#7d8896">not set</span>');
+  }
+  add('source', S.cal.from, S.cal.from === 'two anchors' ? 'ok' :
+       S.cal.from === 'uncalibrated' ? 'bad' : 'warn');
+  add('slope', `${S.cal.slope.toFixed(6)} s per raw unit`);
+
+  if (S.cal.from === 'two anchors'){
+    const drift = (S.cal.slope / DEFAULT_UNIT - 1) * 100;
+    const acc = Math.abs(drift/100) * (S.videoDur || 0);
+    add('vs. deciseconds',
+      `${drift >= 0 ? '+' : ''}${drift.toFixed(4)}% \u2014 ${acc.toFixed(1)} s across the recording`,
+      Math.abs(acc) < 1 ? 'ok' : Math.abs(acc) < 5 ? 'warn' : 'bad');
+    if (Math.abs(S.cal.B.raw - S.cal.A.raw) * DEFAULT_UNIT < 600)
+      add('warning', 'Anchors are less than 10 min apart \u2014 the slope is poorly constrained. ' +
+          'Put one in set 1 and one in the last set.', 'warn');
+  }
+  $('calState').textContent = S.cal.from;
+}
+
+/* ── filters ─────────────────────────────────────────────── */
+
+function facets(){
+  const F = [];
+  const tally = (key, fn, order) => {
+    const m = new Map();
+    S.plays.forEach(p => { const v = fn(p); if (v != null && v !== '') m.set(v, (m.get(v)||0)+1); });
+    let keys = [...m.keys()];
+    keys.sort(order || ((a,b) => m.get(b)-m.get(a)));
+    F.push({ key, values: keys.map(v => ({ v, n: m.get(v) })) });
+  };
+
+  tally('set',    p => p.set, (a,b) => a-b);
+  tally('team',   p => p.team, (a,b) => a<b?-1:1);
+  tally('skill',  p => p.skill,
+        (a,b) => SKILL_ORDER.indexOf(a) - SKILL_ORDER.indexOf(b));
+  // (skill, combination) pairs — never combination alone. K-codes sit on E, L/V/P on A.
+  tally('call',   p => p.skill === 'E' && p.combination ? p.combination : null);
+  tally('attack', p => p.skill === 'A' && p.combination ? p.combination : null);
+  tally('hitType',p => p.hitType);
+  tally('effect', p => p.effect);
+  tally('player', p => p.player ? p.team + p.player : null);
+  return F;
+}
+
+const FACET_TITLE = {
+  set:'Set', team:'Team', skill:'Skill', call:'Setter call (on the set touch)',
+  attack:'Attack combination (on the attack touch)', hitType:'Hit type',
+  effect:'Outcome', player:'Player'
+};
+
+function facetLabel(key, v){
+  if (key === 'skill')  return SKILL[v] || v;
+  if (key === 'team')   return S.teams[v] || v;
+  if (key === 'effect') return `${v} ${EFFECT[v]||''}`.trim();
+  if (key === 'player') return `${S.teams[v[0]]||v[0]} #${v.slice(1).replace(/^0+(?=\d)/,'')}` +
+                               (S.roster[v] ? ` ${S.roster[v]}` : '');
+  if (key === 'call' || key === 'attack')
+    return S.labels[v] ? `${v} ${S.labels[v]}` : v;
+  return String(v);
+}
+
+function facetValue(p, key){
+  switch(key){
+    case 'set': return p.set;
+    case 'team': return p.team;
+    case 'skill': return p.skill;
+    case 'call': return p.skill === 'E' && p.combination ? p.combination : null;
+    case 'attack': return p.skill === 'A' && p.combination ? p.combination : null;
+    case 'hitType': return p.hitType;
+    case 'effect': return p.effect;
+    case 'player': return p.player ? p.team + p.player : null;
+  }
+}
+
+function renderFilters(){
+  const host = $('filters');
+  host.innerHTML = '';
+  for (const f of facets()){
+    if (!f.values.length) continue;
+    const g = el('div','grp');
+    g.appendChild(el('b', null, FACET_TITLE[f.key] || f.key));
+    const box = el('div','chips');
+    for (const { v, n } of f.values){
+      const c = el('div','chip');
+      c.appendChild(document.createTextNode(facetLabel(f.key, v)));
+      c.appendChild(el('small', null, n));
+      if (S.filt[f.key]?.has(v)) c.classList.add('on');
+      c.onclick = () => {
+        S.filt[f.key] = S.filt[f.key] || new Set();
+        S.filt[f.key].has(v) ? S.filt[f.key].delete(v) : S.filt[f.key].add(v);
+        if (!S.filt[f.key].size) delete S.filt[f.key];
+        render();
+      };
+      box.appendChild(c);
+    }
+    g.appendChild(box);
+    host.appendChild(g);
+  }
+}
+
+$('clearFilt').onclick = () => { S.filt = {}; render(); };
+
+function matched(){
+  const keys = Object.keys(S.filt);
+  if (!keys.length) return [];
+  return S.plays.filter(p => keys.every(k => S.filt[k].has(facetValue(p, k))));
+}
+
+/* ── clip model ──────────────────────────────────────────── */
+
+function anchorPlay(p){
+  if ($('anchorMode').value === 'self') return p;
+  // The attack that followed: next A touch in the same rally by the same team.
+  const r = S.rallies[p.rally];
+  for (let i = p.i + 1; i <= r.last; i++){
+    const q = S.plays[i];
+    if (q.team !== p.team) break;
+    if (q.skill === 'A') return q;
+  }
+  return null;                                    // set produced no attack — drop it
+}
+
+function bounds(p, mode){
+  const r = S.rallies[p.rally];
+  if (mode === 'rally') return [S.plays[r.first], S.plays[r.last]];
+  if (mode === 'touch') return [p, p];
+
+  // phase: back to the start of this team's contiguous possession, forward through
+  // the opponent's reply, so the clip reads pass -> set -> attack -> outcome.
+  let a = p.i;
+  while (a > r.first && S.plays[a-1].team === p.team) a--;
+  if (a > r.first) a--;                            // include the ball that came over
+  let b = p.i;
+  while (b < r.last && S.plays[b+1].team === p.team) b++;
+  while (b < r.last && S.plays[b+1].team !== p.team) b++;
+  return [S.plays[a], S.plays[b]];
+}
+
+function buildClips(){
+  const mode = $('window').value;
+  const pre  = +$('pre').value || 0;
+  const post = +$('post').value || 0;
+  const min  = +$('minlen').value || 0;
+
+  const raw = [];
+  for (const m of matched()){
+    const p = anchorPlay(m);
+    if (!p) continue;
+    const [a, b] = bounds(p, mode);
+    let s = vt(a) - pre, e = vt(b) + post;
+    if (e - s < min) e = s + min;
+    raw.push({ s: Math.max(0, s), e, p, m, rally: p.rally });
+  }
+  raw.sort((x, y) => x.s - y.s);
+
+  // Merge overlaps so two selected touches in one rally give one clip, not two near-duplicates.
+  const out = [];
+  for (const c of raw){
+    const last = out[out.length-1];
+    if (last && c.s <= last.e){
+      last.e = Math.max(last.e, c.e);
+      last.also = (last.also||0) + 1;
+    } else out.push(Object.assign({}, c));
+  }
+  out.forEach((c,i) => { c.n = i+1; c.label = describe(c.m); });
+  S.clips = out;
+}
+
+function renderClips(){
+  const host = $('cliplist');
+  host.innerHTML = '';
+  if (!S.clips.length){
+    host.appendChild(el('div','note','Select at least one filter above to build clips.'));
+  }
+  S.clips.forEach((c, i) => {
+    const d = el('div','clip' + (i === S.cur ? ' cur' : ''));
+    d.appendChild(el('i', null, String(c.n).padStart(3,'0')));
+    d.appendChild(el('b', null, clock(c.s)));
+    d.appendChild(document.createTextNode(c.label + (c.also ? `  +${c.also} more` : '')));
+    d.appendChild(el('u', null, (c.e - c.s).toFixed(1) + 's'));
+    d.onclick = () => { S.cur = i; S.montage = false; seekClip(i); render(); };
+    host.appendChild(d);
+  });
+  const tot = S.clips.reduce((a,c) => a + (c.e - c.s), 0);
+  $('clipCount').textContent = S.clips.length
+    ? `${S.clips.length} clips · ${clock(tot)} total` : '';
+}
+
+['window','pre','post','minlen','anchorMode'].forEach(id =>
+  $(id).addEventListener('change', render));
+
+/* ── playback ────────────────────────────────────────────── */
+
+const V = $('v');
+
+function seekClip(i){
+  const c = S.clips[i]; if (!c) return;
+  V.currentTime = c.s + (+$('nudge').value || 0);
+  $('nowPlaying').textContent = `${String(c.n).padStart(3,'0')}  ${c.label}`;
+  V.play().catch(()=>{});
+}
+$('play').onclick = () => { if (!S.clips.length) return; S.montage = true; S.cur = 0; seekClip(0); render(); };
+$('next').onclick = () => { if (S.cur < S.clips.length-1){ S.cur++; seekClip(S.cur); render(); } };
+$('prev').onclick = () => { if (S.cur > 0){ S.cur--; seekClip(S.cur); render(); } };
+$('stopMon').onclick = () => { S.montage = false; V.pause(); };
+
+V.addEventListener('timeupdate', () => {
+  $('vpos').textContent = clock(V.currentTime);
+  if (!S.montage) return;
+  const c = S.clips[S.cur];
+  if (c && V.currentTime >= c.e){
+    if (S.cur < S.clips.length-1){ S.cur++; seekClip(S.cur); renderClips(); }
+    else { S.montage = false; V.pause(); }
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if (/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  if (e.key === ' ')      { e.preventDefault(); V.paused ? V.play() : V.pause(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); $('next').click(); }
+  else if (e.key === 'ArrowLeft')  { e.preventDefault(); $('prev').click(); }
+  else if (e.key === ',') V.currentTime -= 0.1;
+  else if (e.key === '.') V.currentTime += 0.1;
+});
+
+/* ── export ──────────────────────────────────────────────── */
+
+function save(name, text, mime){
+  const b = new Blob([text], { type: mime || 'application/json' });
+  const a = el('a'); a.href = URL.createObjectURL(b); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+$('expEdl').onclick = () => save('montage.edl.json', JSON.stringify({
+  source: S.video?.name || null,
+  scout: S.file?.name || null,
+  calibration: { slope: S.cal.slope, offset: S.cal.offset, source: S.cal.from,
+                 anchors: { A: S.cal.A, B: S.cal.B } },
+  filter: Object.fromEntries(Object.entries(S.filt).map(([k,v]) => [k, [...v]])),
+  window: { mode: $('window').value, pre: +$('pre').value, post: +$('post').value },
+  clips: S.clips.map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
+    duration: +(c.e-c.s).toFixed(3), label: c.label, set: c.m.set, rally: c.rally,
+    team: c.m.team, player: c.m.player, skill: c.m.skill,
+    combination: c.m.combination, effect: c.m.effect }))
+}, null, 2));
+
+$('expCsv').onclick = () => {
+  const rows = [['n','start','end','duration','set','team','player','skill','combination','effect','label']];
+  S.clips.forEach(c => rows.push([c.n, c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
+    c.m.set, c.m.team, c.m.player, c.m.skill, c.m.combination||'', c.m.effect||'',
+    '"'+c.label.replace(/"/g,'""')+'"']));
+  save('montage.csv', rows.map(r => r.join(',')).join('\n'), 'text/csv');
+};
+
+/* ── render ──────────────────────────────────────────────── */
+
+function render(){
+  const t = $('finfo'); t.innerHTML = '';
+  const add = (k,v,cls) => { const r = t.insertRow(); r.insertCell().textContent = k;
+    const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
+  if (S.file) add('scout', `${S.file.name} \u00b7 ${S.plays.length.toLocaleString()} plays \u00b7 ` +
+    `${S.rallies.length} rallies \u00b7 ${S.teams.a} vs ${S.teams.b}`);
+  if (S.video) add('video', `${S.video.name} \u00b7 ${bytes(S.video.size)} \u00b7 ${clock(S.videoDur)}`);
+  if (!S.file || !S.video) add('waiting on',
+    [!S.file && '.vsm', !S.video && '.mp4'].filter(Boolean).join(' and '), 'warn');
+
+  const ready = S.plays.length && S.videoDur;
+  $('calSec').hidden = $('filtSec').hidden = $('clipSec').hidden = !ready;
+  if (!ready) return;
+
+  renderCal();
+  renderFilters();
+  const m = matched();
+  $('filtCount').textContent = Object.keys(S.filt).length
+    ? `${m.length} touches match` : 'no filter set';
+  $('anchorNote').textContent = $('anchorMode').value === 'attack'
+    ? 'Clips anchor on the attack that followed the matched touch. Matched touches with no ' +
+      'following attack by the same team are dropped \u2014 that gap is itself informative.'
+    : '';
+  buildClips();
+  renderClips();
+}
+
+recalc(); render();
+</script>
+</body>
+</html>
