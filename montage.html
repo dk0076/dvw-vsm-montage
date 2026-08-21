@@ -1005,6 +1005,10 @@ function renderReel(){
 /* Whichever list playback and export are currently pointed at. */
 const active = () => S.src === 'reel' ? reelClips() : S.clips;
 
+/* What the Reel panel's buttons export — the reel itself, regardless of what is
+   currently being previewed. Falls back to filter results only if empty. */
+const exportList = () => S.reel.length ? reelClips() : S.clips;
+
 
 const V = $('v');
 
@@ -1365,14 +1369,16 @@ async function exportMp4(clips, onProgress, opts){
 
   // One card per section, encoded up front.
   const cards = {};
-  let titleEntry = null;
+  let titleEntry = null, cardError = null;
   if (opts.titles){
     const names = [];
     clips.forEach(c => { if (c.section && !names.includes(c.section)) names.push(c.section); });
     for (const name of names){
-      const n = clips.filter(c => c.section === name).length;
-      cards[name] = await encodeTitle(name, `${n} clip${n===1?'':'s'}`, v, frameDur,
-                                      opts.titleSeconds || 2);
+      try {
+        const n = clips.filter(c => c.section === name).length;
+        cards[name] = await encodeTitle(name, `${n} clip${n===1?'':'s'}`, v, frameDur,
+                                        opts.titleSeconds || 2);
+      } catch (e){ cardError = e.message || String(e); break; }
     }
     const first = cards[names[0]];
     if (first) titleEntry = avc1Entry(v.width, v.height, first.description);
@@ -1434,11 +1440,12 @@ async function exportMp4(clips, onProgress, opts){
 
   // Blob slices stay lazily backed by the file — no footage enters memory.
   return { blob: new Blob([ftyp, moov, mdatHdr, ...parts], { type:'video/mp4' }),
-           placed, bytes: outPos, cards: Object.keys(cards).length };
+           placed, bytes: outPos, cards: Object.keys(cards).length,
+           cardFrames: Object.values(cards).reduce((a,c)=>a+c.frames.length,0), cardError };
 }
 
 $('expMp4').onclick = async () => {
-  const clips = active();
+  const clips = exportList();
   if (!clips.length || !S.video) return;
   const status = t => { $('expStatus').textContent = t; };
   const bar = p => { $('expBar').style.width = Math.round(p*100) + '%'; };
@@ -1447,8 +1454,8 @@ $('expMp4').onclick = async () => {
     if (!S.mp4){ status('Reading sample table\u2026'); bar(0.05); S.mp4 = await parseMp4(S.video); }
     if (S.mp4.error) throw new Error(S.mp4.error);
     status(`Assembling ${clips.length} clips\u2026`);
-    const { blob, placed, bytes, cards } = await exportMp4(clips, p => bar(0.05 + p*0.9),
-      { titles: $('titleCards').checked && S.src === 'reel',
+    const { blob, placed, bytes, cards, cardFrames, cardError } = await exportMp4(clips, p => bar(0.05 + p*0.9),
+      { titles: $('titleCards').checked && clips.some(c => c.section),
         titleSeconds: +$('titleSec').value || 2 });
 
     const name = (S.file?.name || 'montage').replace(/\.[^.]+$/,'') +
@@ -1464,7 +1471,8 @@ $('expMp4').onclick = async () => {
     status(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
       `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy, no re-encode \u00b7 ` +
       `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
-      (cards ? ` \u00b7 ${cards} title cards` : ''));
+      (cards ? ` \u00b7 ${cards} title cards (${cardFrames} frames written)` : '') +
+      (cardError ? ` \u00b7 title cards skipped: ${cardError}` : ''));
   } catch (err){
     status('Export failed: ' + (err.message || err)); bar(0); console.error(err);
   } finally { $('expMp4').disabled = false; }
@@ -1484,7 +1492,7 @@ $('expEdl').onclick = () => save('montage.edl.json', JSON.stringify({
   filter: Object.fromEntries(Object.entries(S.filt).map(([k,v]) => [k, [...v]])),
   window: { mode: $('window').value, pre: +$('pre').value, post: +$('post').value },
   reel: S.reel,
-  clips: active().map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
+  clips: exportList().map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
     duration: +(c.e-c.s).toFixed(3), label: c.label, set: c.m.set, rally: c.rally,
     team: c.m.team, player: c.m.player, skill: c.m.skill,
     combination: c.m.combination, effect: c.m.effect }))
@@ -1492,7 +1500,7 @@ $('expEdl').onclick = () => save('montage.edl.json', JSON.stringify({
 
 $('expCsv').onclick = () => {
   const rows = [['n','section','start','end','duration','set','team','player','skill','combination','effect','label']];
-  active().forEach(c => rows.push([c.n, c.section||'', c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
+  exportList().forEach(c => rows.push([c.n, c.section||'', c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
     c.m.set, c.m.team, c.m.player, c.m.skill, c.m.combination||'', c.m.effect||'',
     '"'+c.label.replace(/"/g,'""')+'"']));
   save('montage.csv', rows.map(r => r.join(',')).join('\n'), 'text/csv');
