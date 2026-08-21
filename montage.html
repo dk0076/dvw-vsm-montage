@@ -91,20 +91,27 @@
 
   <section id="calSec" hidden>
     <h2>Calibration <span id="calState"></span></h2>
-    <div class="note" id="calHelp">
-      Pick a play, seek the video to the exact contact, then set it as an anchor.
-      Two anchors far apart derive both the offset and the time unit.
+    <div class="note">
+      Seek the video to the exact contact of the selected touch, then add it as an anchor.
+      Add at least one per set &mdash; the residuals will tell you whether the error is a
+      constant, a drift, or a break in the recording.
     </div>
     <div class="rule"></div>
     <div class="row">
       <select id="calPick" style="flex:1;min-width:0"></select>
       <button id="calSeek">Seek to estimate</button>
+      <button class="go" id="calAdd">Add anchor</button>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="calA">Set anchor A</button>
-      <button id="calB">Set anchor B</button>
-      <button id="calClear">Clear</button>
+      <label class="f">Fit
+        <select id="calFit">
+          <option value="linear">linear &mdash; one line for the match</option>
+          <option value="piecewise">piecewise &mdash; interpolate between anchors</option>
+        </select>
+      </label>
+      <button id="calClear">Clear anchors</button>
     </div>
+    <div class="row" style="margin-top:8px" id="calJump"></div>
     <table id="calOut" style="margin-top:10px"></table>
   </section>
 
@@ -184,7 +191,7 @@ const DEFAULT_UNIT = 0.1;   // deciseconds, pending calibration
 const S = {
   raw:null, plays:[], rallies:[], teams:{a:'Team A',b:'Team B'},
   labels:{}, video:null, videoDur:0,
-  cal:{ A:null, B:null, slope:DEFAULT_UNIT, offset:0, from:'assumed' },
+  cal:{ anchors:[], sorted:[], fit:'linear', slope:DEFAULT_UNIT, offset:0, from:'uncalibrated' },
   filt:{},           // facet -> Set of values
   clips:[], cur:-1, montage:false
 };
@@ -238,6 +245,96 @@ function codeTable(arr){
   return m;
 }
 
+/* ── rotation ────────────────────────────────────────────────
+   Rotation is not on the play; it has to come off the event's lineup state.
+   VolleyStation's field names for that vary by version, so scan rather than
+   assume: prefer an explicit setter-position integer, else locate a 6-element
+   lineup (ordered P1..P6 by convention) and take the setter's index in it.   */
+
+const sideOf = p => {
+  const s = p.toLowerCase();
+  if (/away|visit|guest|teamb|\/b(\/|$)/.test(s)) return 'b';
+  if (/home|teama|\/a(\/|$)/.test(s))            return 'a';
+  return null;
+};
+const num = x => { const n = Number(String(x).trim()); return Number.isFinite(n) ? n : null; };
+
+function scanEvent(ev){
+  const arrays = [], ints = [];
+  (function scan(o, path, depth){
+    if (!o || typeof o !== 'object' || depth < 0) return;
+    if (Array.isArray(o)){
+      if (o.length === 6){
+        if (o.every(x => typeof x === 'string' || typeof x === 'number'))
+          arrays.push({ path, val: o.map(String) });
+        else if (o.every(x => x && typeof x === 'object')){
+          const n = o.map(x => x.player ?? x.number ?? x.shirtNumber ?? x.shirt ?? '');
+          if (n.every(x => x !== '')) arrays.push({ path, val: n.map(String) });
+        }
+      }
+      o.forEach((x,i) => scan(x, path+'/'+i, depth-1));
+      return;
+    }
+    for (const [k,v] of Object.entries(o)){
+      if (k === 'exchange' || k === 'plays') continue;   // plays[] can be 6 long — not a lineup
+      if (/setter/i.test(k) && Number.isInteger(v) && v >= 1 && v <= 6)
+        ints.push({ path: path+'/'+k, val: v });
+      scan(v, path+'/'+k, depth-1);
+    }
+  })(ev, '', 4);
+  return { arrays, ints };
+}
+
+function computeRotations(rallies, plays){
+  // Setter identity per (set, team): the player with the most set touches.
+  const tally = {};
+  plays.forEach(p => { if (p.skill === 'E' && p.player){
+    const k = `${p.set}|${p.team}|${p.player}`; tally[k] = (tally[k]||0)+1; } });
+  const setter = {};
+  for (const [k,n] of Object.entries(tally)){
+    const [st, tm, pl] = k.split('|'), kk = st+'|'+tm;
+    if (!setter[kk] || n > setter[kk].n) setter[kk] = { player: pl, n };
+  }
+
+  let method = null, hit = 0;
+  for (const r of rallies){
+    const { arrays, ints } = scanEvent(r.ev);
+    const rot = {};
+
+    for (const i of ints){ const s = sideOf(i.path); if (s && rot[s] == null){
+      rot[s] = i.val; method = method || 'explicit setter position'; } }
+
+    if (arrays.length){
+      const byside = {};
+      arrays.forEach(a => { const s = sideOf(a.path); if (s && !byside[s]) byside[s] = a.val; });
+      if (!Object.keys(byside).length && arrays.length >= 2){
+        byside.a = arrays[0].val; byside.b = arrays[1].val;      // positional fallback
+      }
+      for (const [s, lu] of Object.entries(byside)){
+        if (rot[s] != null) continue;
+        const st = setter[`${r.set}|${s}`]; if (!st) continue;
+        const idx = lu.findIndex(x => num(x) !== null && num(x) === num(st.player));
+        if (idx >= 0){ rot[s] = idx + 1; method = method || 'setter index in lineup'; }
+      }
+    }
+    r.rot = rot;
+    if (rot.a != null || rot.b != null) hit++;
+  }
+  return { method, hit, total: rallies.length, setter };
+}
+
+/* Phase: what kind of ball started this team's current possession. */
+function phaseOf(p, plays, rallies){
+  if (p.skill === 'S') return 'Serve';
+  const r = rallies[p.rally];
+  let a = p.i;
+  while (a > r.first && plays[a-1].team === p.team) a--;
+  const f = plays[a];
+  if (f.skill === 'R') return 'Reception';
+  if (f.skill === 'F') return 'Freeball';
+  return 'Transition';
+}
+
 async function loadVsm(f){
   let txt = await f.text();
   if (txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);
@@ -274,31 +371,63 @@ async function loadVsm(f){
           combination: p.combination, raw: p.time
         });
       });
-      rallies.push({ id: rid, set: si+1, first, last: plays.length-1 });
+      rallies.push({ id: rid, set: si+1, first, last: plays.length-1, ev });
     });
   });
   if (!plays.length) throw new Error('no plays found under scout.sets[].events[].exchange.plays[]');
 
   S.plays = plays; S.rallies = rallies;
-  S.rawMin = Math.min(...plays.map(p => p.raw));
-  S.cal.offset = 0;
+  S.rotInfo = computeRotations(rallies, plays);
+  plays.forEach(p => {
+    p.rot   = rallies[p.rally].rot?.[p.team] ?? null;
+    p.phase = phaseOf(p, plays, rallies);
+  });
+  const raws = plays.map(p => p.raw).filter(x => Number.isFinite(x));
+  if (raws.length !== plays.length)
+    console.warn(`${plays.length - raws.length} plays carry no usable time value`);
+  S.rawMin = Math.min(...raws);
+  S.cal.anchors = []; S.cal.sorted = [];
+  recalc();
   S.filt = {};
 }
 
 /* ── time mapping ────────────────────────────────────────── */
 
-const vt = p => S.cal.offset + (p.raw - S.rawMin) * S.cal.slope;
+/* Linear prediction — always computed, since the residual against it is the
+   diagnostic that distinguishes drift from a discontinuity. */
+const linPred = raw => S.cal.offset + (raw - S.rawMin) * S.cal.slope;
+
+function mapRaw(raw){
+  const A = S.cal.sorted || [];
+  if (S.cal.fit === 'piecewise' && A.length >= 2){
+    const seg = i => (A[i+1].v - A[i].v) / (A[i+1].raw - A[i].raw);
+    if (raw <= A[0].raw)               return A[0].v + (raw - A[0].raw) * seg(0);
+    for (let i = 0; i < A.length-1; i++)
+      if (raw <= A[i+1].raw)           return A[i].v + (raw - A[i].raw) * seg(i);
+    const L = A.length-1;
+    return A[L].v + (raw - A[L].raw) * seg(L-1);
+  }
+  return linPred(raw);
+}
+const vt = p => mapRaw(p.raw);
 
 function recalc(){
-  const { A, B } = S.cal;
-  if (A && B && A.raw !== B.raw){
-    S.cal.slope  = (B.v - A.v) / (B.raw - A.raw);
-    S.cal.offset = A.v - (A.raw - S.rawMin) * S.cal.slope;
-    S.cal.from   = 'two anchors';
-  } else if (A){
+  const A = S.cal.anchors;
+  S.cal.sorted = [...A].sort((x,y) => x.raw - y.raw);
+
+  if (A.length >= 2){
+    const n = A.length;
+    const mx = A.reduce((s,p) => s+p.raw, 0)/n;
+    const my = A.reduce((s,p) => s+p.v,   0)/n;
+    let num = 0, den = 0;
+    A.forEach(p => { num += (p.raw-mx)*(p.v-my); den += (p.raw-mx)**2; });
+    S.cal.slope  = den ? num/den : DEFAULT_UNIT;
+    S.cal.offset = my - (mx - S.rawMin) * S.cal.slope;
+    S.cal.from   = `${n} anchors`;
+  } else if (A.length === 1){
     S.cal.slope  = DEFAULT_UNIT;
-    S.cal.offset = A.v - (A.raw - S.rawMin) * DEFAULT_UNIT;
-    S.cal.from   = 'one anchor, unit assumed';
+    S.cal.offset = A[0].v - (A[0].raw - S.rawMin) * DEFAULT_UNIT;
+    S.cal.from   = '1 anchor, unit assumed';
   } else {
     S.cal.slope  = DEFAULT_UNIT;
     S.cal.offset = 0;
@@ -316,56 +445,99 @@ function describe(p){
 
 $('calSeek').onclick = () => {
   const p = S.plays[+$('calPick').value];
-  if (p) { $('v').currentTime = Math.max(0, vt(p)); }
+  if (p) $('v').currentTime = Math.max(0, vt(p));
 };
-$('calA').onclick = () => setAnchor('A');
-$('calB').onclick = () => setAnchor('B');
-$('calClear').onclick = () => { S.cal.A = S.cal.B = null; recalc(); render(); };
-
-function setAnchor(which){
+$('calAdd').onclick = () => {
   const p = S.plays[+$('calPick').value];
   if (!p) return;
-  S.cal[which] = { raw: p.raw, v: $('v').currentTime, label: describe(p) };
+  S.cal.anchors = S.cal.anchors.filter(a => a.raw !== p.raw);
+  S.cal.anchors.push({ raw: p.raw, v: $('v').currentTime, set: p.set, label: describe(p) });
   recalc(); render();
-}
+};
+$('calClear').onclick = () => { S.cal.anchors = []; recalc(); render(); };
+$('calFit').onchange = () => { S.cal.fit = $('calFit').value; render(); };
 
 function renderCal(){
   const sel = $('calPick');
-  if (sel.options.length !== S.plays.length){
+  const sig = [S.plays.length, S.cal.slope, S.cal.offset, S.cal.fit, S.cal.anchors.length].join('|');
+  if (sel.dataset.sig !== sig){
+    sel.dataset.sig = sig;
+    const keep = sel.value;
     sel.innerHTML = '';
-    // Serves are the cleanest anchors: unambiguous single moment of contact.
+    // Serves are the cleanest anchors: one unambiguous moment of contact.
     S.plays.forEach(p => {
       const o = el('option', null, `${describe(p)}  \u2014 est ${clock(vt(p))}`);
       o.value = p.i;
       if (p.skill !== 'S') o.style.color = '#7d8896';
       sel.appendChild(o);
     });
+    if (keep) sel.value = keep;
   }
+
+  // Jump to the first serve of each set — the fastest way to see structure.
+  const jump = $('calJump'); jump.innerHTML = '';
+  jump.appendChild(el('span', null, 'Spot-check:'));
+  jump.firstChild.style.color = '#7d8896';
+  [...new Set(S.plays.map(p => p.set))].sort((a,b)=>a-b).forEach(st => {
+    const first = S.plays.find(p => p.set === st && p.skill === 'S') ||
+                  S.plays.find(p => p.set === st);
+    if (!first) return;
+    const b = el('button', null, 'Set ' + st);
+    b.onclick = () => { sel.value = first.i; $('v').currentTime = Math.max(0, vt(first)); };
+    jump.appendChild(b);
+  });
 
   const t = $('calOut'); t.innerHTML = '';
   const add = (k, v, cls) => { const r = t.insertRow();
     r.insertCell().textContent = k;
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
 
-  for (const w of ['A','B']){
-    const a = S.cal[w];
-    add('anchor ' + w, a ? `${clock(a.v)} \u2014 ${a.label}` : '<span style="color:#7d8896">not set</span>');
-  }
-  add('source', S.cal.from, S.cal.from === 'two anchors' ? 'ok' :
-       S.cal.from === 'uncalibrated' ? 'bad' : 'warn');
+  const A = S.cal.sorted || [];
+  if (!A.length) add('anchors', '<span class="bad">none \u2014 every clip time is a guess</span>');
+
+  let rms = 0, worst = null;
+  A.forEach((a, i) => {
+    const res = linPred(a.raw) - a.v;
+    rms += res*res;
+    if (!worst || Math.abs(res) > Math.abs(worst.res)) worst = { res, a };
+    const cls = Math.abs(res) < 0.6 ? 'ok' : Math.abs(res) < 2 ? 'warn' : 'bad';
+    add(`anchor ${i+1} \u00b7 set ${a.set}`,
+      `${clock(a.v)} \u2014 ${a.label}` +
+      (A.length >= 2 ? ` &nbsp; <span class="${cls}">residual ` +
+        `${res>=0?'+':''}${res.toFixed(2)} s</span>` : ''));
+  });
+  rms = A.length >= 2 ? Math.sqrt(rms / A.length) : null;
+
+  add('fit', S.cal.from, A.length >= 2 ? 'ok' : A.length ? 'warn' : 'bad');
   add('slope', `${S.cal.slope.toFixed(6)} s per raw unit`);
 
-  if (S.cal.from === 'two anchors'){
+  if (A.length >= 2){
     const drift = (S.cal.slope / DEFAULT_UNIT - 1) * 100;
     const acc = Math.abs(drift/100) * (S.videoDur || 0);
     add('vs. deciseconds',
-      `${drift >= 0 ? '+' : ''}${drift.toFixed(4)}% \u2014 ${acc.toFixed(1)} s across the recording`,
-      Math.abs(acc) < 1 ? 'ok' : Math.abs(acc) < 5 ? 'warn' : 'bad');
-    if (Math.abs(S.cal.B.raw - S.cal.A.raw) * DEFAULT_UNIT < 600)
-      add('warning', 'Anchors are less than 10 min apart \u2014 the slope is poorly constrained. ' +
-          'Put one in set 1 and one in the last set.', 'warn');
+      `${drift>=0?'+':''}${drift.toFixed(4)}% \u2014 ${acc.toFixed(1)} s across the recording`,
+      acc < 1 ? 'ok' : acc < 5 ? 'warn' : 'bad');
+    add('residual RMS', `${rms.toFixed(2)} s \u00b7 worst ${worst.res>=0?'+':''}` +
+      `${worst.res.toFixed(2)} s in set ${worst.a.set}`,
+      rms < 0.6 ? 'ok' : rms < 2 ? 'warn' : 'bad');
+
+    const span = (A[A.length-1].raw - A[0].raw) * DEFAULT_UNIT;
+    if (span < 600)
+      add('note', 'Anchors span under 10 minutes \u2014 the slope is poorly constrained. ' +
+        'Put one in set 1 and one in the last set.', 'warn');
+
+    const d = el('div','verdict ' + (rms < 0.6 ? 'ok' : rms < 2 ? 'warn' : 'bad'));
+    d.textContent = rms < 0.6
+      ? 'A single line fits every anchor. The mapping is sound — any remaining error is ' +
+        'constant and belongs in the nudge field.'
+      : rms < 2
+      ? 'Residuals are larger than a rally is forgiving. Add an anchor in each set; if the ' +
+        'residuals then group by set rather than scatter, the recording has a break in it.'
+      : 'No single line fits these anchors. Something discontinuous happened — the recorder ' +
+        'stopped, or coding paused. Add one anchor per set and switch the fit to piecewise.';
+    t.parentNode.appendChild(d);
   }
-  $('calState').textContent = S.cal.from;
+  $('calState').textContent = S.cal.from + (S.cal.fit === 'piecewise' ? ' \u00b7 piecewise' : '');
 }
 
 /* ── filters ─────────────────────────────────────────────── */
@@ -382,6 +554,10 @@ function facets(){
 
   tally('set',    p => p.set, (a,b) => a-b);
   tally('team',   p => p.team, (a,b) => a<b?-1:1);
+  tally('rotation', p => p.rot ? 'S'+p.rot : null, (a,b) => a<b?-1:1);
+  tally('phase',  p => p.phase,
+        (a,b) => ['Serve','Reception','Transition','Freeball'].indexOf(a) -
+                 ['Serve','Reception','Transition','Freeball'].indexOf(b));
   tally('skill',  p => p.skill,
         (a,b) => SKILL_ORDER.indexOf(a) - SKILL_ORDER.indexOf(b));
   // (skill, combination) pairs — never combination alone. K-codes sit on E, L/V/P on A.
@@ -394,7 +570,10 @@ function facets(){
 }
 
 const FACET_TITLE = {
-  set:'Set', team:'Team', skill:'Skill', call:'Setter call (on the set touch)',
+  set:'Set', team:'Team', skill:'Skill',
+  rotation:'Rotation \u2014 own team, named by setter zone',
+  phase:'Phase \u2014 what started the possession',
+  call:'Setter call (on the set touch)',
   attack:'Attack combination (on the attack touch)', hitType:'Hit type',
   effect:'Outcome', player:'Player'
 };
@@ -415,6 +594,8 @@ function facetValue(p, key){
     case 'set': return p.set;
     case 'team': return p.team;
     case 'skill': return p.skill;
+    case 'rotation': return p.rot ? 'S'+p.rot : null;
+    case 'phase': return p.phase;
     case 'call': return p.skill === 'E' && p.combination ? p.combination : null;
     case 'attack': return p.skill === 'A' && p.combination ? p.combination : null;
     case 'hitType': return p.hitType;
@@ -586,7 +767,7 @@ $('expEdl').onclick = () => save('montage.edl.json', JSON.stringify({
   source: S.video?.name || null,
   scout: S.file?.name || null,
   calibration: { slope: S.cal.slope, offset: S.cal.offset, source: S.cal.from,
-                 anchors: { A: S.cal.A, B: S.cal.B } },
+                 fit: S.cal.fit, anchors: S.cal.anchors },
   filter: Object.fromEntries(Object.entries(S.filt).map(([k,v]) => [k, [...v]])),
   window: { mode: $('window').value, pre: +$('pre').value, post: +$('post').value },
   clips: S.clips.map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
@@ -611,6 +792,18 @@ function render(){
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
   if (S.file) add('scout', `${S.file.name} \u00b7 ${S.plays.length.toLocaleString()} plays \u00b7 ` +
     `${S.rallies.length} rallies \u00b7 ${S.teams.a} vs ${S.teams.b}`);
+  if (S.rotInfo){
+    const r = S.rotInfo, pct = r.total ? Math.round(100*r.hit/r.total) : 0;
+    const who = Object.entries(r.setter)
+      .filter(([k]) => k.startsWith('1|'))
+      .map(([k,v]) => `${S.teams[k.split('|')[1]]||k.split('|')[1]} #${v.player.replace(/^0+(?=\d)/,'')}`)
+      .join(', ');
+    add('rotation', r.method
+      ? `${r.method} \u00b7 ${r.hit}/${r.total} rallies (${pct}%)` +
+        (who ? ` \u00b7 set-1 setters ${who}` : '')
+      : 'not found in the event objects \u2014 rotation filter unavailable',
+      !r.method ? 'bad' : pct > 95 ? 'ok' : 'warn');
+  }
   if (S.video) add('video', `${S.video.name} \u00b7 ${bytes(S.video.size)} \u00b7 ${clock(S.videoDur)}`);
   if (!S.file || !S.video) add('waiting on',
     [!S.file && '.vsm', !S.video && '.mp4'].filter(Boolean).join(' and '), 'warn');
