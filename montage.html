@@ -107,9 +107,10 @@
   <section id="calSec" hidden>
     <h2>Calibration <span id="calState"></span></h2>
     <div class="note">
-      Seek the video to the exact contact of the selected touch, then add it as an anchor.
-      Add at least one per set &mdash; the residuals will tell you whether the error is a
-      constant, a drift, or a break in the recording.
+      The scout file already carries video timestamps, so clips should land correctly with
+      no anchors at all. Add anchors only to <em>correct</em> a file whose timestamps are
+      wrong &mdash; the residuals then say whether the error is a constant, a drift, or a
+      break in the recording.
     </div>
     <div class="rule"></div>
     <div class="row">
@@ -608,7 +609,7 @@ async function loadDvw(f){
   S.rotInfo = { method: 'setter position column', hit: withRot, total: plays.length,
                 setter: {}, perPlay: true };
   S.videoFiles = [...vids];
-  S.rawMin = Math.min(...plays.map(p => p.raw));
+  S.rawMin = Math.min(...plays.map(p => p.raw));   // informational only
   S.cal.anchors = []; S.cal.sorted = [];
   recalc();
   S.filt = {}; S.reel = [];
@@ -662,9 +663,11 @@ async function loadVsm(f){
 
 /* ── time mapping ────────────────────────────────────────── */
 
-/* Linear prediction — always computed, since the residual against it is the
-   diagnostic that distinguishes drift from a discontinuity. */
-const linPred = raw => S.cal.offset + (raw - S.rawMin) * S.cal.slope;
+/* The scout file's timestamp IS the position in the video — DVW stores whole
+   seconds, VSM deciseconds, both measured from the start of the recording. So
+   the identity mapping (offset 0, slope = unit) is already correct and no
+   calibration is needed. Anchors exist only to correct a file that is wrong. */
+const linPred = raw => S.cal.offset + raw * S.cal.slope;
 
 function mapRaw(raw){
   const A = S.cal.sorted || [];
@@ -691,16 +694,16 @@ function recalc(){
     let num = 0, den = 0;
     A.forEach(p => { num += (p.raw-mx)*(p.v-my); den += (p.raw-mx)**2; });
     S.cal.slope  = den ? num/den : S.unit;
-    S.cal.offset = my - (mx - S.rawMin) * S.cal.slope;
+    S.cal.offset = my - mx * S.cal.slope;
     S.cal.from   = `${n} anchors`;
   } else if (A.length === 1){
     S.cal.slope  = S.unit;
-    S.cal.offset = A[0].v - (A[0].raw - S.rawMin) * S.unit;
-    S.cal.from   = '1 anchor, unit assumed';
+    S.cal.offset = A[0].v - A[0].raw * S.unit;
+    S.cal.from   = '1 anchor offset';
   } else {
     S.cal.slope  = S.unit;
     S.cal.offset = 0;
-    S.cal.from   = 'uncalibrated';
+    S.cal.from   = 'file timestamps';
   }
 }
 
@@ -762,7 +765,10 @@ function renderCal(){
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
 
   const A = S.cal.sorted || [];
-  if (!A.length) add('anchors', '<span class="bad">none \u2014 every clip time is a guess</span>');
+  if (!A.length) add('mapping',
+    `<span class="ok">using the file's own video timestamps directly</span> ` +
+    `<span style="color:#7d8896">\u2014 ${S.unit === 1 ? 'seconds' : 'deciseconds'} ` +
+    `from the start of the recording. Add anchors only if clips land wrong.</span>`);
 
   let rms = 0, worst = null;
   A.forEach((a, i) => {
@@ -777,7 +783,7 @@ function renderCal(){
   });
   rms = A.length >= 2 ? Math.sqrt(rms / A.length) : null;
 
-  add('fit', S.cal.from, A.length >= 2 ? 'ok' : A.length ? 'warn' : 'bad');
+  add('fit', S.cal.from, A.length >= 2 ? 'ok' : A.length ? 'warn' : 'ok');
   add('slope', `${S.cal.slope.toFixed(6)} s per raw unit`);
 
   if (A.length >= 2){
@@ -1739,8 +1745,13 @@ function render(){
   const t = $('finfo'); t.innerHTML = '';
   const add = (k,v,cls) => { const r = t.insertRow(); r.insertCell().textContent = k;
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
-  if (S.file) add('scout', `${S.file.name} \u00b7 ${S.plays.length.toLocaleString()} plays \u00b7 ` +
-    `${S.rallies.length} rallies \u00b7 ${S.teams.a} vs ${S.teams.b}`);
+  if (S.file){
+    const names = Object.values(S.teams || {});
+    add('scout', `${S.file.name} \u00b7 ${S.plays.length.toLocaleString()} touches \u00b7 ` +
+      `${S.rallies.length} rallies \u00b7 ${names.join(' vs ')}`);
+    add('first touch', `${clock(S.rawMin * S.unit)} into the recording ` +
+      `<span style="color:#7d8896">\u2014 the file's own video timestamp, used as-is</span>`);
+  }
   if (S.codeOf){
     const r = t.insertRow();
     r.insertCell().textContent = 'sides';
