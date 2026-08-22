@@ -98,8 +98,8 @@
   <section>
     <h2>Files</h2>
     <label class="drop" id="drop">
-      <input type="file" multiple accept=".vsm,.json,.mp4,.mov,.m4v">
-      Drop the .vsm and the .mp4 — or click to pick
+      <input type="file" multiple accept=".vsm,.dvw,.json,.mp4,.mov,.m4v">
+      Drop the .vsm or .dvw and the .mp4 — or click to pick
     </label>
     <table id="finfo" style="margin-top:10px"></table>
   </section>
@@ -227,13 +227,14 @@ const SKILL_ORDER = ['S','R','E','A','B','D','F'];
 const EFFECT = {
   '#':'perfect / kill', '+':'positive', '!':'ok', '-':'poor', '/':'blocked / over', '=':'error'
 };
-const DEFAULT_UNIT = 0.1;   // deciseconds, pending calibration
+const DEFAULT_UNIT = 0.1;   // .vsm default; .dvw overrides to 1 (whole seconds)
 
 /* ── state ───────────────────────────────────────────────── */
 
 const S = {
   raw:null, plays:[], rallies:[], teams:{a:'Team A',b:'Team B'},
   labels:{}, video:null, videoDur:0,
+  unit:DEFAULT_UNIT,
   cal:{ anchors:[], sorted:[], fit:'linear', slope:DEFAULT_UNIT, offset:0, from:'uncalibrated' },
   filt:{}, reel:[], src:'filter',
   clips:[], cur:-1, montage:false
@@ -262,6 +263,7 @@ async function load(files){
     const ext = f.name.split('.').pop().toLowerCase();
     try {
       if (['mp4','mov','m4v'].includes(ext)) loadVideo(f);
+      else if (ext === 'dvw')                await loadDvw(f);
       else                                   await loadVsm(f);
     } catch(err){ alert(`${f.name}: ${err.message||err}`); }
   }
@@ -512,11 +514,111 @@ function phaseOf(p, plays, rallies){
   return 'Transition';
 }
 
+/* ── DVW ─────────────────────────────────────────────────────
+   DataVolley's text format. Structurally richer than the .vsm for our purposes:
+   the team code is explicit, setter position is stated per row, and the file
+   carries its own combination and setter-call name tables. Video time is only
+   integer seconds, which is the one thing it does worse.                     */
+
+const DVW_SKILLS = 'SRAEBDF';
+
+function dvwSection(lines, name){
+  const i = lines.findIndex(l => l.trim().toUpperCase() === '['+name+']');
+  if (i < 0) return [];
+  const out = [];
+  for (let k = i+1; k < lines.length; k++){
+    if (lines[k].startsWith('[')) break;
+    if (lines[k].trim()) out.push(lines[k].split(';'));
+  }
+  return out;
+}
+
+function dvwCode(c){
+  if (!c || c.length < 6) return null;
+  const player = c.slice(1,3);
+  if (!/^\d\d$/.test(player)) return null;          // skips point, lineup and sub rows
+  const skill = c[3];
+  if (!DVW_SKILLS.includes(skill)) return null;
+  let combination = c.slice(6,8);
+  if (!combination || combination.includes('~')) combination = '';
+  return { team: c[0], player, skill, hitType: c[4], effect: c[5], combination };
+}
+
+async function loadDvw(f){
+  const lines = (await f.text()).replace(/^\uFEFF/,'').split(/\r?\n/);
+  S.file = f; S.unit = 1;                            // video time is in seconds
+
+  const teamRows = dvwSection(lines, '3TEAMS');
+  const mkPlayers = rows => rows.map(r => ({
+    number: r[1],
+    firstName: r[10] || '', lastName: r[9] || '',
+    position: r[12] || null,
+    libero: (r[12] || '').toUpperCase() === 'L'
+  })).filter(p => p.number);
+
+  // `*` is always the home team in DataVolley — no inference required.
+  S.raw = { team: {
+    home: { name: (teamRows[0]||[])[1] || 'Home', code: '*',
+            players: mkPlayers(dvwSection(lines, '3PLAYERS-H')) },
+    away: { name: (teamRows[1]||[])[1] || 'Away', code: 'a',
+            players: mkPlayers(dvwSection(lines, '3PLAYERS-V')) } } };
+
+  S.labels = {};
+  for (const r of dvwSection(lines, '3ATTACKCOMBINATION')) if (r[0]) S.labels[r[0]] = r[4] || r[0];
+  for (const r of dvwSection(lines, '3SETTERCALL'))        if (r[0]) S.labels[r[0]] = r[2] || r[0];
+
+  const scout = dvwSection(lines, '3SCOUT');
+  const plays = [], rallies = [];
+  let first = plays.length, vids = new Set();
+
+  const closeRally = () => {
+    if (plays.length > first)
+      rallies.push({ id: rallies.length, set: plays[first].set,
+                     first, last: plays.length-1, ev: null });
+    first = plays.length;
+  };
+
+  for (const r of scout){
+    const code = r[0] || '';
+    // A point row terminates the rally: *p05:03 / ap00:01
+    if (/^[*a]p\d+:\d+/.test(code)){ closeRally(); continue; }
+    const c = dvwCode(code);
+    if (!c) continue;
+    const t = parseInt(r[12], 10);
+    if (!Number.isFinite(t)) continue;
+    if (r[11]) vids.add(r[11]);
+    plays.push({
+      i: plays.length, rally: rallies.length, seq: plays.length - first,
+      set: parseInt(r[8],10) || 1, team: c.team, player: c.player,
+      skill: c.skill, hitType: c.hitType, effect: c.effect,
+      combination: c.combination, raw: t,
+      rot: parseInt(c.team === '*' ? r[9] : r[10], 10) || null
+    });
+  }
+  closeRally();
+  if (!plays.length) throw new Error('no usable touches found in [3SCOUT]');
+
+  S.plays = plays; S.rallies = rallies;
+  resolveSides(S.raw, plays);
+  buildRoster(S.raw);
+  computeRoles();
+  plays.forEach(p => { p.phase = phaseOf(p, plays, rallies); });
+
+  const withRot = plays.filter(p => p.rot).length;
+  S.rotInfo = { method: 'setter position column', hit: withRot, total: plays.length,
+                setter: {}, perPlay: true };
+  S.videoFiles = [...vids];
+  S.rawMin = Math.min(...plays.map(p => p.raw));
+  S.cal.anchors = []; S.cal.sorted = [];
+  recalc();
+  S.filt = {}; S.reel = [];
+}
+
 async function loadVsm(f){
   let txt = await f.text();
   if (txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);
   const d = JSON.parse(txt);
-  S.raw = d; S.file = f;
+  S.raw = d; S.file = f; S.unit = 0.1;   // deciseconds
 
   S.labels = Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls));
 
@@ -588,15 +690,15 @@ function recalc(){
     const my = A.reduce((s,p) => s+p.v,   0)/n;
     let num = 0, den = 0;
     A.forEach(p => { num += (p.raw-mx)*(p.v-my); den += (p.raw-mx)**2; });
-    S.cal.slope  = den ? num/den : DEFAULT_UNIT;
+    S.cal.slope  = den ? num/den : S.unit;
     S.cal.offset = my - (mx - S.rawMin) * S.cal.slope;
     S.cal.from   = `${n} anchors`;
   } else if (A.length === 1){
-    S.cal.slope  = DEFAULT_UNIT;
-    S.cal.offset = A[0].v - (A[0].raw - S.rawMin) * DEFAULT_UNIT;
+    S.cal.slope  = S.unit;
+    S.cal.offset = A[0].v - (A[0].raw - S.rawMin) * S.unit;
     S.cal.from   = '1 anchor, unit assumed';
   } else {
-    S.cal.slope  = DEFAULT_UNIT;
+    S.cal.slope  = S.unit;
     S.cal.offset = 0;
     S.cal.from   = 'uncalibrated';
   }
@@ -679,16 +781,16 @@ function renderCal(){
   add('slope', `${S.cal.slope.toFixed(6)} s per raw unit`);
 
   if (A.length >= 2){
-    const drift = (S.cal.slope / DEFAULT_UNIT - 1) * 100;
+    const drift = (S.cal.slope / S.unit - 1) * 100;
     const acc = Math.abs(drift/100) * (S.videoDur || 0);
-    add('vs. deciseconds',
+    add(S.unit === 1 ? 'vs. seconds' : 'vs. deciseconds',
       `${drift>=0?'+':''}${drift.toFixed(4)}% \u2014 ${acc.toFixed(1)} s across the recording`,
       acc < 1 ? 'ok' : acc < 5 ? 'warn' : 'bad');
     add('residual RMS', `${rms.toFixed(2)} s \u00b7 worst ${worst.res>=0?'+':''}` +
       `${worst.res.toFixed(2)} s in set ${worst.a.set}`,
       rms < 0.6 ? 'ok' : rms < 2 ? 'warn' : 'bad');
 
-    const span = (A[A.length-1].raw - A[0].raw) * DEFAULT_UNIT;
+    const span = (A[A.length-1].raw - A[0].raw) * S.unit;
     if (span < 600)
       add('note', 'Anchors span under 10 minutes \u2014 the slope is poorly constrained. ' +
         'Put one in set 1 and one in the last set.', 'warn');
