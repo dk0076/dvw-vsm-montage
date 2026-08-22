@@ -6,188 +6,268 @@
 <title>montage</title>
 <style>
   :root{
-    --bg:#0d1117; --panel:#151b23; --line:#242c38; --line2:#2f3a48;
-    --ink:#d7dee8; --dim:#7d8896; --key:#8fd0ff;
+    --bg:#0d1117; --panel:#161d26; --panel2:#1b232e; --line:#252e3b; --line2:#33405180;
+    --ink:#e2e8f0; --dim:#8996a6; --key:#6cc0ff;
     --ok:#5fd68a; --warn:#e8c05a; --bad:#f0736a;
+    --ui:ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-       font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:18px}
-  h1{font-size:15px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
-     color:var(--dim);margin:0 0 14px}
-  section{background:var(--panel);border:1px solid var(--line);border-radius:6px;
-          padding:13px 15px;margin-bottom:14px}
-  section>h2{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--key);
-             margin:0 0 10px;font-weight:600;display:flex;justify-content:space-between;
-             align-items:center;gap:10px}
-  section>h2 span{color:var(--dim);letter-spacing:0;text-transform:none;font-weight:400}
-  .wrap{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:14px;
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--ui);
+       padding:20px 18px 60px}
+  .mono,td.v,.t{font-family:var(--mono)}
+
+  header.top{max-width:1500px;margin:0 auto 18px;display:flex;align-items:baseline;gap:14px}
+  header.top h1{font-size:17px;font-weight:650;letter-spacing:-.01em;margin:0}
+  header.top p{margin:0;color:var(--dim);font-size:13px}
+
+  .wrap{display:grid;grid-template-columns:minmax(0,1fr) minmax(380px,.95fr);gap:16px;
         align-items:start;max-width:1500px;margin-inline:auto}
-  @media(max-width:1000px){.wrap{grid-template-columns:1fr}}
-  .right{position:sticky;top:18px}
+  @media(max-width:1040px){.wrap{grid-template-columns:1fr}}
+  .right{position:sticky;top:20px}
+
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+          padding:15px 17px;margin-bottom:14px}
+  section>h2{font-size:13px;font-weight:600;margin:0 0 12px;display:flex;
+             align-items:center;gap:9px;color:var(--ink)}
+  section>h2 .n{width:20px;height:20px;border-radius:50%;background:var(--panel2);
+                border:1px solid var(--line2);color:var(--dim);font-size:11px;
+                display:grid;place-items:center;flex:none;font-family:var(--mono)}
+  section>h2 .n.on{background:#17384f;border-color:#2f6d96;color:#bfe3ff}
+  section>h2 em{margin-left:auto;font-style:normal;font-weight:400;color:var(--dim);
+                font-size:12px;font-family:var(--mono)}
 
   button,select,input[type=number],input[type=text]{
-    font:inherit;background:#1c242e;color:var(--ink);border:1px solid var(--line2);
-    border-radius:4px;padding:4px 9px;cursor:pointer}
-  button:hover{border-color:var(--key)}
+    font:inherit;font-size:13px;background:var(--panel2);color:var(--ink);
+    border:1px solid var(--line2);border-radius:7px;padding:6px 11px;cursor:pointer}
+  button{white-space:nowrap}
+  button:hover{border-color:var(--key);background:#1f2a36}
   button:disabled{opacity:.35;cursor:default}
-  button.go{background:#1b3a52;border-color:#2f6d96;color:#cfe8fb}
-  input[type=number]{width:64px;cursor:text}
-  label.f{display:inline-flex;gap:5px;align-items:center;color:var(--dim);margin-right:12px}
+  button.go{background:#17384f;border-color:#2f6d96;color:#cfe8fb}
+  button.go:hover{background:#1d4763}
+  input[type=text],input[type=number]{cursor:text}
+  input[type=number]{width:68px}
+  label.f{display:inline-flex;gap:6px;align-items:center;color:var(--dim);font-size:13px}
+  .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .rule{height:1px;background:var(--line);margin:13px -17px}
+  .note{color:var(--dim);font-size:12.5px;margin:9px 0 0}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
 
-  .chips{display:flex;flex-wrap:wrap;gap:5px}
-  .chip{border:1px solid var(--line2);border-radius:3px;padding:2px 7px;font-size:12px;
-        background:#1a212b;color:var(--dim);cursor:pointer;user-select:none;white-space:nowrap}
-  .chip:hover{border-color:var(--key)}
-  .chip.on{background:#1b3a52;border-color:#3f7fa8;color:#d6ecfb}
-  .chip small{color:#5d6b7c;margin-left:4px}
-  .chip.on small{color:#87b4d0}
-  .grp{margin-bottom:9px}
-  .grp>b{display:block;font-weight:400;color:var(--dim);font-size:11px;
-         letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px}
+  details{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+  details>summary{cursor:pointer;color:var(--dim);font-size:12.5px;list-style:none;
+                  display:flex;align-items:center;gap:7px}
+  details>summary::-webkit-details-marker{display:none}
+  details>summary::before{content:'▸';font-size:10px;transition:.15s}
+  details[open]>summary::before{transform:rotate(90deg)}
+  details>summary:hover{color:var(--ink)}
+  details .inner{padding-top:11px}
 
-  video{width:100%;background:#000;border-radius:4px;display:block}
-  #card{position:absolute;inset:0;background:#0b0f14;border-radius:4px;display:flex;
+  /* chips + pills */
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{border:1px solid var(--line2);border-radius:999px;padding:4px 11px;font-size:12.5px;
+        background:var(--panel2);color:var(--dim);cursor:pointer;user-select:none;
+        white-space:nowrap;transition:.12s}
+  .chip:hover{border-color:var(--key);color:var(--ink)}
+  .chip.on{background:#17384f;border-color:#3f8fc0;color:#dcefff}
+  .chip small{color:#5d6b7c;margin-left:5px;font-family:var(--mono)}
+  .chip.on small{color:#8dc3e6}
+  .grp{margin-bottom:13px}
+  .grp>b{display:block;font-weight:500;color:var(--dim);font-size:11.5px;margin-bottom:6px}
+  #pillBar{background:var(--panel2);border:1px solid var(--line2);border-radius:8px;
+           padding:9px 11px;margin-bottom:13px}
+  .pill{display:inline-flex;align-items:center;gap:2px;background:#17384f;
+        border:1px solid #3f8fc0;color:#dcefff;border-radius:999px;
+        padding:3px 4px 3px 11px;font-size:12.5px;margin:0 6px 0 0}
+  .pill button{background:none;border:none;color:#8dc3e6;padding:0 6px;font-size:15px;
+               line-height:1;border-radius:50%}
+  .pill button:hover{color:#fff;background:#2a5f80}
+  button.quick{background:var(--panel2);border-style:dashed}
+
+  video{width:100%;background:#000;border-radius:8px;display:block}
+  #card{position:absolute;inset:0;background:#0b0f14;border-radius:8px;display:flex;
         flex-direction:column;justify-content:center;padding:0 9%;gap:10px}
   #card[hidden]{display:none}
-  #card span{font:600 clamp(20px,4.2vw,40px)/1.15 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif;
-             color:#eef4fb;border-left:4px solid var(--key);padding-left:14px}
-  #card em{font-style:normal;color:var(--dim);font-size:13px;padding-left:18px}
-  .drop{border:1px dashed var(--line2);border-radius:5px;padding:16px;text-align:center;
-        color:var(--dim);cursor:pointer;background:#12181f}
-  .drop:hover,.drop.hot{border-color:var(--key);color:var(--ink)}
+  #card span{font:650 clamp(20px,4vw,38px)/1.15 var(--ui);color:#eef4fb;
+             border-left:4px solid var(--key);padding-left:15px}
+  #card em{font-style:normal;color:var(--dim);font-size:13px;padding-left:19px;
+           font-family:var(--mono)}
+
+  .drop{display:block;border:1.5px dashed var(--line2);border-radius:9px;padding:24px;
+        text-align:center;color:var(--dim);cursor:pointer;background:var(--panel2);
+        transition:.15s;font-size:13.5px}
+  .drop:hover,.drop.hot{border-color:var(--key);color:var(--ink);background:#1d2733}
   .drop input{display:none}
 
-  table{border-collapse:collapse;width:100%;font-size:12px}
-  td{padding:2px 8px 2px 0}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  td{padding:3px 10px 3px 0;vertical-align:top}
   td:first-child{color:var(--dim);white-space:nowrap;width:1%}
+  td.v,#finfo td:nth-child(2){font-family:var(--mono);font-size:12px}
 
-  #cliplist{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:4px}
-  .clip{padding:5px 9px;border-bottom:1px solid var(--line);cursor:pointer;
-        display:flex;gap:9px;align-items:baseline;font-size:12px}
+  #cliplist{max-height:330px;overflow:auto;border:1px solid var(--line);border-radius:8px;
+            background:var(--panel2)}
+  #reel{max-height:430px;overflow:auto}
+  .clip{padding:7px 10px;border-bottom:1px solid var(--line);cursor:pointer;
+        display:flex;gap:10px;align-items:center;font-size:12.5px}
   .clip:last-child{border-bottom:0}
-  .clip:hover{background:#1b232d}
-  .clip.cur{background:#1b3a52}
-  .clip i{color:var(--dim);font-style:normal;width:34px;flex:none}
-  .clip b{font-weight:600;color:var(--key);flex:none}
-  .clip u{text-decoration:none;color:var(--dim);margin-left:auto;flex:none}
-
-  .note{color:var(--dim);font-size:12px;margin:8px 0 0}
-  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
-  .rule{height:1px;background:var(--line);margin:11px 0}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  kbd{border:1px solid var(--line2);border-radius:3px;padding:0 4px;color:var(--dim);font-size:11px}
-  .bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin:9px 0 0}
-  .bar>i{display:block;height:100%;background:var(--key);width:0;transition:.2s}
-  .sec{margin-top:8px}
-  .sec>header{display:flex;gap:6px;align-items:center;color:var(--key);font-size:11px;
-              letter-spacing:.12em;text-transform:uppercase;padding:4px 0}
+  .clip:hover{background:#212b38}
+  .clip.cur{background:#17384f}
+  .clip i{color:var(--dim);font-style:normal;width:30px;flex:none;font-family:var(--mono)}
+  .clip b{font-weight:600;color:var(--key);flex:none;font-family:var(--mono);font-size:12px}
+  .clip u{text-decoration:none;color:var(--dim);flex:none;font-family:var(--mono);font-size:11.5px}
+  .clip button{padding:2px 9px;font-size:13px;line-height:1.2;border-radius:6px}
+  .sec{margin-bottom:6px}
+  .sec>header{display:flex;gap:6px;align-items:center;color:var(--key);font-size:12px;
+              font-weight:600;padding:7px 2px 5px}
   .sec>header b{flex:1;font-weight:600}
-  .sec>header button{padding:1px 6px;font-size:11px}
-  .clip button{padding:0 6px;font-size:12px;line-height:1.4}
-  #reel{max-height:420px;overflow:auto}
+  .sec>header button{padding:2px 8px;font-size:12px}
+
+  .bar{height:4px;background:var(--line);border-radius:3px;overflow:hidden;margin:10px 0 0}
+  .bar>i{display:block;height:100%;background:var(--key);width:0;transition:.25s}
+  kbd{border:1px solid var(--line2);border-radius:4px;padding:1px 5px;color:var(--dim);
+      font-size:11px;font-family:var(--mono)}
+  .empty{color:var(--dim);font-size:12.5px;text-align:center;padding:22px 12px;line-height:1.6}
 </style>
 </head>
 <body>
 
-<h1>Montage</h1>
+<header class="top">
+  <h1>Montage</h1>
+  <p>Build clip reels from a scout file and match video &mdash; everything stays on this machine.</p>
+</header>
 
 <div class="wrap">
 <div class="left">
 
   <section>
-    <h2>Files</h2>
+    <h2><span class="n" id="n1">1</span> Load files <em id="loadState"></em></h2>
     <label class="drop" id="drop">
       <input type="file" multiple accept=".vsm,.dvw,.json,.mp4,.mov,.m4v">
-      Drop the .vsm or .dvw and the .mp4 — or click to pick
+      Drop the scout file <b>(.dvw or .vsm)</b> and the match <b>.mp4</b><br>
+      <span style="font-size:12px">or click to choose them</span>
     </label>
-    <table id="finfo" style="margin-top:10px"></table>
-  </section>
-
-  <section id="calSec" hidden>
-    <h2>Calibration <span id="calState"></span></h2>
-    <div class="note">
-      The scout file already carries video timestamps, so clips should land correctly with
-      no anchors at all. Add anchors only to <em>correct</em> a file whose timestamps are
-      wrong &mdash; the residuals then say whether the error is a constant, a drift, or a
-      break in the recording.
-    </div>
-    <div class="rule"></div>
-    <div class="row">
-      <select id="calPick" style="flex:1;min-width:0"></select>
-      <button id="calSeek">Seek to estimate</button>
-      <button class="go" id="calAdd">Add anchor</button>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <label class="f">Fit
-        <select id="calFit">
-          <option value="linear">linear &mdash; one line for the match</option>
-          <option value="piecewise">piecewise &mdash; interpolate between anchors</option>
-        </select>
-      </label>
-      <button id="calClear">Clear anchors</button>
-    </div>
-    <div class="row" style="margin-top:8px" id="calJump"></div>
-    <table id="calOut" style="margin-top:10px"></table>
+    <table id="finfo" style="margin-top:12px"></table>
+    <details id="diagWrap" hidden>
+      <summary>Technical details</summary>
+      <div class="inner"><table id="diag"></table></div>
+    </details>
+    <details id="calSec" hidden>
+      <summary id="calSummary">Timing</summary>
+      <div class="inner">
+        <div class="note" style="margin-top:0">
+          The scout file carries its own video timestamps, so clips land correctly with no
+          setup. Use this only to <em>correct</em> a file whose timestamps are wrong.
+        </div>
+        <div class="row" style="margin-top:11px">
+          <select id="calPick" style="flex:1;min-width:0"></select>
+          <button id="calSeek">Seek</button>
+          <button class="go" id="calAdd">Set anchor here</button>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <label class="f">Fit
+            <select id="calFit">
+              <option value="linear">linear</option>
+              <option value="piecewise">piecewise</option>
+            </select>
+          </label>
+          <button id="calClear">Clear anchors</button>
+          <span id="calJump" class="row" style="gap:6px"></span>
+        </div>
+        <table id="calOut" style="margin-top:11px"></table>
+      </div>
+    </details>
   </section>
 
   <section id="filtSec" hidden>
-    <h2>Filter <span id="filtCount"></span></h2>
-    <div id="filters"></div>
-    <div class="rule"></div>
-    <div class="row">
-      <label class="f">Anchor on
-        <select id="anchorMode">
-          <option value="self">the matched touch</option>
-          <option value="attack">the attack that followed</option>
-        </select>
-      </label>
-      <button id="clearFilt">Clear all</button>
+    <h2><span class="n" id="n2">2</span> Find plays <em id="filtCount"></em></h2>
+
+    <div class="row" id="quickRow" style="margin-bottom:12px">
+      <span style="color:var(--dim);font-size:12px">Quick picks</span>
+      <span id="quick" class="row" style="gap:6px"></span>
     </div>
-    <div class="note" id="anchorNote"></div>
+
+    <div id="pillBar" hidden>
+      <span id="activePills"></span>
+      <button id="clearFilt" style="margin-left:4px">Clear all</button>
+    </div>
+
+    <input type="text" id="facetSearch" placeholder="Search players, codes, outcomes&hellip;"
+           style="width:100%;margin-bottom:13px">
+
+    <div id="filters"></div>
+
+    <details id="playerWrap">
+      <summary id="playerSummary">Players</summary>
+      <div class="inner"><div id="playerFilters"></div></div>
+    </details>
+    <details>
+      <summary>More filters &mdash; set, hit type, outcome</summary>
+      <div class="inner"><div id="moreFilters"></div></div>
+    </details>
   </section>
 
   <section id="clipSec" hidden>
-    <h2>Clips <span id="clipCount"></span></h2>
-    <div class="row">
-      <label class="f">Window
-        <select id="window">
-          <option value="phase">phase</option>
-          <option value="touch">touch</option>
-          <option value="rally">rally</option>
-        </select>
-      </label>
-      <label class="f">Lead-in <input type="number" id="pre" value="2.0" step="0.5" min="0"></label>
-      <label class="f">Tail <input type="number" id="post" value="3.0" step="0.5" min="0"></label>
-      <label class="f">Min <input type="number" id="minlen" value="4" step="1" min="1"></label>
-    </div>
-    <div class="rule"></div>
-    <div class="row">
-      <input type="text" id="secName" placeholder="section name, e.g. Setter serving" style="flex:1;min-width:0">
-      <button id="addAll">Add all to reel</button>
-    </div>
+    <h2><span class="n" id="n3">3</span> Build the reel <em id="clipCount"></em></h2>
+
     <div id="cliplist"></div>
-    <div class="row" style="margin-top:10px">
-      <button class="go" id="play">Preview filter results</button>
-      <span style="color:#7d8896">click a clip to jump &middot; <b>+</b> adds it to the reel</span>
+
+    <div class="row" style="margin-top:11px">
+      <input type="text" id="secName" placeholder="Name this group, e.g. GCU setter serving"
+             style="flex:1;min-width:0">
+      <button class="go" id="addAll">Add all &rarr; reel</button>
+    </div>
+    <div class="note">Click a clip to jump to it &middot; <b>+</b> adds just that one</div>
+
+    <details>
+      <summary>Clip window &amp; anchoring</summary>
+      <div class="inner">
+        <div class="row">
+          <label class="f">Show
+            <select id="window">
+              <option value="phase">the whole phase</option>
+              <option value="touch">just the touch</option>
+              <option value="rally">the full rally</option>
+            </select>
+          </label>
+          <label class="f">Anchor on
+            <select id="anchorMode">
+              <option value="self">the matched touch</option>
+              <option value="attack">the attack that followed</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <label class="f">Lead-in <input type="number" id="pre" value="2.0" step="0.5" min="0"></label>
+          <label class="f">Tail <input type="number" id="post" value="3.0" step="0.5" min="0"></label>
+          <label class="f">Min length <input type="number" id="minlen" value="4" step="1" min="1"></label>
+        </div>
+        <div class="note" id="anchorNote"></div>
+      </div>
+    </details>
+    <div class="row" style="margin-top:11px">
+      <button id="play">Preview these clips</button>
     </div>
   </section>
 
   <section id="reelSec" hidden>
-    <h2>Reel <span id="reelCount"></span></h2>
+    <h2>Reel <em id="reelCount"></em></h2>
     <div id="reel"></div>
     <div class="rule"></div>
     <div class="row">
-      <label class="f"><input type="checkbox" id="titleCards" checked> Section title cards</label>
-      <label class="f">Hold <input type="number" id="titleSec" value="2" step="0.5" min="0.5"></label>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button class="go" id="playReel">Play reel</button>
+      <button class="go" id="playReel">&#9654; Play reel</button>
       <button class="go" id="expMp4">Export MP4</button>
-      <button id="expEdl">EDL (json)</button>
-      <button id="expCsv">Clip list (csv)</button>
-      <button id="reelClear">Clear reel</button>
+      <button id="reelClear">Clear</button>
     </div>
+    <details>
+      <summary>Export options &amp; other formats</summary>
+      <div class="inner">
+        <div class="row">
+          <label class="f"><input type="checkbox" id="titleCards" checked> Section title cards</label>
+          <label class="f">Hold <input type="number" id="titleSec" value="2" step="0.5" min="0.5"></label>
+          <button id="expEdl">EDL (json)</button>
+          <button id="expCsv">Clip list (csv)</button>
+        </div>
+      </div>
+    </details>
     <div class="note" id="expStatus">&nbsp;</div>
     <div class="bar"><i id="expBar"></i></div>
   </section>
@@ -195,7 +275,7 @@
 </div>
 <div class="right">
   <section>
-    <h2>Video <span id="vpos"></span></h2>
+    <h2>Video <em id="vpos"></em></h2>
     <div style="position:relative">
       <video id="v" controls preload="metadata"></video>
       <div id="card" hidden>
@@ -203,17 +283,17 @@
         <em id="cardSub"></em>
       </div>
     </div>
-    <div class="row" style="margin-top:9px">
-      <button id="prev">&#8592; Prev</button>
-      <button id="next">Next &#8594;</button>
-      <button id="stopMon">Stop montage</button>
+    <div class="row" style="margin-top:11px">
+      <button id="prev">&larr; Prev</button>
+      <button id="next">Next &rarr;</button>
+      <button id="stopMon">Stop</button>
       <label class="f" style="margin-left:auto">Nudge
-        <input type="number" id="nudge" value="0" step="0.1" style="width:70px">
+        <input type="number" id="nudge" value="0" step="0.1" style="width:72px">
       </label>
     </div>
     <div class="note" id="nowPlaying">&nbsp;</div>
-    <div class="note"><kbd>space</kbd> play/pause &nbsp; <kbd>&#8592;</kbd><kbd>&#8594;</kbd> clip &nbsp;
-      <kbd>,</kbd><kbd>.</kbd> nudge 0.1&#8202;s</div>
+    <div class="note"><kbd>space</kbd> play/pause &nbsp; <kbd>&larr;</kbd><kbd>&rarr;</kbd> clip
+      &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 0.1s</div>
   </section>
 </div>
 </div>
@@ -812,7 +892,6 @@ function renderCal(){
         'stopped, or coding paused. Add one anchor per set and switch the fit to piecewise.';
     t.parentNode.appendChild(d);
   }
-  $('calState').textContent = S.cal.from + (S.cal.fit === 'piecewise' ? ' \u00b7 piecewise' : '');
 }
 
 /* ── filters ─────────────────────────────────────────────── */
@@ -899,31 +978,93 @@ function facetValue(p, key){
   }
 }
 
-function renderFilters(){
-  const host = $('filters');
-  host.innerHTML = '';
-  for (const f of facets()){
-    if (!f.values.length) continue;
-    const g = el('div','grp');
-    g.appendChild(el('b', null, facetTitle(f.key)));
-    const box = el('div','chips');
-    for (const { v, n } of f.values){
-      const c = el('div','chip');
-      c.appendChild(document.createTextNode(facetLabel(f.key, v)));
-      c.appendChild(el('small', null, n));
-      if (S.filt[f.key]?.has(v)) c.classList.add('on');
-      c.onclick = () => {
-        S.filt[f.key] = S.filt[f.key] || new Set();
-        S.filt[f.key].has(v) ? S.filt[f.key].delete(v) : S.filt[f.key].add(v);
-        if (!S.filt[f.key].size) delete S.filt[f.key];
-        render();
-      };
-      box.appendChild(c);
-    }
-    g.appendChild(box);
-    host.appendChild(g);
-  }
+/* Facets are split by how often they get used: the ones that answer most
+   questions stay visible, rosters and code-level detail fold away. */
+const PRIMARY   = ['team','position','skill','attack','call','rotation','phase'];
+const SECONDARY = ['set','hitType','effect'];
+
+function toggleFacet(key, v){
+  S.filt[key] = S.filt[key] || new Set();
+  S.filt[key].has(v) ? S.filt[key].delete(v) : S.filt[key].add(v);
+  if (!S.filt[key].size) delete S.filt[key];
+  render();
 }
+
+function facetGroup(f, q){
+  if (!f || !f.values.length) return null;
+  const vals = q
+    ? f.values.filter(({v}) => (facetTitle(f.key)+' '+facetLabel(f.key,v)).toLowerCase().includes(q))
+    : f.values;
+  if (!vals.length) return null;
+  const g = el('div','grp');
+  g.appendChild(el('b', null, facetTitle(f.key)));
+  const box = el('div','chips');
+  for (const { v, n } of vals){
+    const c = el('div','chip');
+    c.appendChild(document.createTextNode(facetLabel(f.key, v)));
+    c.appendChild(el('small', null, n));
+    if (S.filt[f.key]?.has(v)) c.classList.add('on');
+    c.onclick = () => toggleFacet(f.key, v);
+    box.appendChild(c);
+  }
+  g.appendChild(box);
+  return g;
+}
+
+/* The handful of attack codes this opponent actually runs, one click each. */
+function renderQuick(){
+  const host = $('quick'); host.innerHTML = '';
+  const m = {};
+  S.plays.forEach(p => { if (p.skill === 'A' && p.combination)
+    m[p.combination] = (m[p.combination]||0) + 1; });
+  const top = Object.entries(m).sort((a,b) => b[1]-a[1]).slice(0,6);
+  $('quickRow').hidden = !top.length;
+  top.forEach(([code, n]) => {
+    const b = el('button','quick', `${S.labels[code] || code} · ${n}`);
+    b.title = `Attack combination ${code}`;
+    b.onclick = () => { S.filt = { attack: new Set([code]) }; render(); };
+    host.appendChild(b);
+  });
+}
+
+function renderFilters(){
+  const F = {}; facets().forEach(f => F[f.key] = f);
+  const q = ($('facetSearch').value || '').trim().toLowerCase();
+
+  // What is currently selected, shown as removable pills rather than left for
+  // the user to find again among the chips.
+  const pills = $('activePills'); pills.innerHTML = '';
+  let n = 0;
+  for (const [k, set] of Object.entries(S.filt)) for (const v of set){
+    n++;
+    const p = el('div','pill');
+    p.appendChild(document.createTextNode(facetLabel(k, v)));
+    const x = el('button', null, '\u00d7');
+    x.title = 'remove';
+    x.onclick = () => toggleFacet(k, v);
+    p.appendChild(x);
+    pills.appendChild(p);
+  }
+  $('pillBar').hidden = !n;
+
+  const host = $('filters'); host.innerHTML = '';
+  PRIMARY.forEach(k => { const g = facetGroup(F[k], q); if (g) host.appendChild(g); });
+
+  const ph = $('playerFilters'); ph.innerHTML = '';
+  let players = 0;
+  Object.keys(F).filter(k => k.startsWith('player@')).sort().forEach(k => {
+    const g = facetGroup(F[k], q);
+    if (g){ ph.appendChild(g); players += F[k].values.length; }
+  });
+  $('playerWrap').hidden = !players;
+  $('playerSummary').textContent = `Players — ${players} on court across both teams`;
+  if (q && players) $('playerWrap').open = true;
+
+  const mh = $('moreFilters'); mh.innerHTML = '';
+  SECONDARY.forEach(k => { const g = facetGroup(F[k], q); if (g) mh.appendChild(g); });
+}
+
+$('facetSearch').addEventListener('input', renderFilters);
 
 $('clearFilt').onclick = () => { S.filt = {}; render(); };
 
@@ -1742,67 +1883,78 @@ $('expCsv').onclick = () => {
 /* ── render ──────────────────────────────────────────────── */
 
 function render(){
-  const t = $('finfo'); t.innerHTML = '';
-  const add = (k,v,cls) => { const r = t.insertRow(); r.insertCell().textContent = k;
+  const t = $('finfo'), d = $('diag');
+  t.innerHTML = ''; d.innerHTML = '';
+  const mk = tbl => (k,v,cls) => { const r = tbl.insertRow();
+    r.insertCell().textContent = k;
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
+  const add = mk(t), tech = mk(d);
+
+  // Plain-language summary: what loaded, and the one number worth eyeballing.
   if (S.file){
-    const names = Object.values(S.teams || {});
-    add('scout', `${S.file.name} \u00b7 ${S.plays.length.toLocaleString()} touches \u00b7 ` +
-      `${S.rallies.length} rallies \u00b7 ${names.join(' vs ')}`);
-    add('first touch', `${clock(S.rawMin * S.unit)} into the recording ` +
-      `<span style="color:#7d8896">\u2014 the file's own video timestamp, used as-is</span>`);
+    add('Match', Object.values(S.teams||{}).join('  vs  '));
+    add('Scout', `${S.plays.length.toLocaleString()} touches, ${S.rallies.length} rallies ` +
+      `<span style="color:#8996a6">\u00b7 ${S.file.name}</span>`);
+    add('First touch', `<b>${clock(S.rawMin * S.unit)}</b> into the recording ` +
+      `<span style="color:#8996a6">\u2014 check the first serve is there</span>`);
   }
+  if (S.video) add('Video', `${clock(S.videoDur)} ` +
+    `<span style="color:#8996a6">\u00b7 ${S.video.name}, ${bytes(S.video.size)}</span>`);
+
+  const need = [!S.file && 'a scout file', !S.video && 'the match .mp4'].filter(Boolean);
+  $('loadState').textContent = need.length ? 'need ' + need.join(' and ') : 'ready';
+  $('n1').classList.toggle('on', !need.length);
+
+  // Diagnostics stay folded away unless something is wrong.
+  $('diagWrap').hidden = !S.file;
   if (S.codeOf){
-    const r = t.insertRow();
+    const r = d.insertRow();
     r.insertCell().textContent = 'sides';
     const c = r.insertCell();
-    c.innerHTML = `<code>${S.codeOf.home}</code> = ${S.teams[S.codeOf.home]} (home) &nbsp;` +
+    c.innerHTML = `<code>${S.codeOf.home}</code> = ${S.teams[S.codeOf.home]} (home), ` +
       `<code>${S.codeOf.away}</code> = ${S.teams[S.codeOf.away]} (away)<br>` +
-      `<span style="color:#7d8896">${S.sideSrc}${S.swapped ? ' \u00b7 manually swapped' : ''}</span> `;
-    const b = el('button', null, 'Swap sides');
-    b.style.marginTop = '4px';
-    b.onclick = swapSides;
-    c.appendChild(b);
+      `<span style="color:#8996a6">${S.sideSrc}${S.swapped ? ' \u00b7 manually swapped' : ''}</span> `;
+    const b2 = el('button', null, 'Swap sides');
+    b2.style.marginTop = '5px'; b2.onclick = swapSides;
+    c.appendChild(b2);
   }
   if (S.rotInfo){
     const r = S.rotInfo, pct = r.total ? Math.round(100*r.hit/r.total) : 0;
-    const who = Object.entries(r.setter)
-      .filter(([k]) => k.startsWith('1|'))
-      .map(([k,v]) => `${S.teams[k.split('|')[1]]||k.split('|')[1]} #${v.player.replace(/^0+(?=\d)/,'')}`)
-      .join(', ');
-    add('rotation', r.method
-      ? `${r.method} \u00b7 ${r.hit}/${r.total} rallies (${pct}%)` +
-        (who ? ` \u00b7 set-1 setters ${who}` : '')
-      : 'not found in the event objects \u2014 rotation filter unavailable',
+    tech('rotation', r.method ? `${r.method} \u00b7 ${r.hit}/${r.total} (${pct}%)`
+      : 'unavailable \u2014 rotation filter disabled',
       !r.method ? 'bad' : pct > 95 ? 'ok' : 'warn');
   }
   if (S.roles){
-    const n = Object.values(S.roleSrc||{});
-    const fromRoster = n.filter(x => x === 'roster').length;
-    add('positions', `${fromRoster}/${n.length} from the roster, ` +
-      `${n.length-fromRoster} derived from play patterns`,
-      fromRoster === n.length ? 'ok' : 'warn');
+    const v = Object.values(S.roleSrc||{});
+    const fr = v.filter(x => x === 'roster').length;
+    tech('positions', `${fr}/${v.length} from the roster, ${v.length-fr} derived from play patterns`,
+      fr === v.length ? 'ok' : 'warn');
   }
-  if (S.video) add('video', `${S.video.name} \u00b7 ${bytes(S.video.size)} \u00b7 ${clock(S.videoDur)}`);
-  if (!S.file || !S.video) add('waiting on',
-    [!S.file && '.vsm', !S.video && '.mp4'].filter(Boolean).join(' and '), 'warn');
+  if (S.plays.length) tech('time unit', S.unit === 1 ? 'whole seconds (dvw)' : 'deciseconds (vsm)');
 
   const ready = S.plays.length && S.videoDur;
   $('calSec').hidden = $('filtSec').hidden = $('clipSec').hidden = !ready;
   if (!ready) return;
 
   renderCal();
+  $('calSummary').innerHTML = S.cal.anchors.length
+    ? `Timing \u2014 <span class="warn">corrected with ${S.cal.anchors.length} anchor(s)</span>`
+    : `Timing \u2014 <span class="ok">using the file's own timestamps</span>`;
+
+  renderQuick();
   renderFilters();
   const m = matched();
-  $('filtCount').textContent = Object.keys(S.filt).length
-    ? `${m.length} touches match` : 'no filter set';
+  const nf = Object.keys(S.filt).length;
+  $('filtCount').textContent = nf ? `${m.length} touches match` : '';
+  $('n2').classList.toggle('on', nf > 0);
   $('anchorNote').textContent = $('anchorMode').value === 'attack'
-    ? 'Clips anchor on the attack that followed the matched touch. Matched touches with no ' +
-      'following attack by the same team are dropped \u2014 that gap is itself informative.'
+    ? 'Clips anchor on the attack that followed the matched touch. Matched touches with no '
+      + 'following attack by the same team are dropped \u2014 that gap is itself informative.'
     : '';
   buildClips();
   renderClips();
   renderReel();
+  $('n3').classList.toggle('on', S.reel.length > 0);
 }
 
 recalc(); render();
