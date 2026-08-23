@@ -126,6 +126,14 @@
   kbd{border:1px solid var(--line2);border-radius:4px;padding:1px 5px;color:var(--dim);
       font-size:11px;font-family:var(--mono)}
   .empty{color:var(--dim);font-size:12.5px;text-align:center;padding:22px 12px;line-height:1.6}
+  .match{display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);
+         border-radius:8px;background:var(--panel2);margin-bottom:7px;font-size:12.5px}
+  .match .tag{width:26px;height:22px;border-radius:5px;background:#17384f;color:#bfe3ff;
+              display:grid;place-items:center;font-family:var(--mono);font-size:11px;flex:none}
+  .match .who{flex:1;min-width:0}
+  .match .who b{display:block;font-weight:600}
+  .match .who span{color:var(--dim);font-size:11.5px;font-family:var(--mono)}
+  .match select{max-width:210px}
 </style>
 </head>
 <body>
@@ -142,10 +150,11 @@
     <h2><span class="n" id="n1">1</span> Load files <em id="loadState"></em></h2>
     <label class="drop" id="drop">
       <input type="file" multiple accept=".vsm,.dvw,.json,.mp4,.mov,.m4v">
-      Drop the scout file <b>(.dvw or .vsm)</b> and the match <b>.mp4</b><br>
-      <span style="font-size:12px">or click to choose them</span>
+      Drop scout files <b>(.dvw or .vsm)</b> and their match <b>.mp4</b>s<br>
+      <span style="font-size:12px">several matches at once is fine &mdash; they get paired automatically</span>
     </label>
-    <table id="finfo" style="margin-top:12px"></table>
+    <div id="matches" style="margin-top:12px"></div>
+    <table id="finfo" style="margin-top:10px"></table>
     <details id="diagWrap" hidden>
       <summary>Technical details</summary>
       <div class="inner"><table id="diag"></table></div>
@@ -275,7 +284,7 @@
 </div>
 <div class="right">
   <section>
-    <h2>Video <em id="vpos"></em></h2>
+    <h2>Video <span id="vsrc" style="font-weight:400;color:var(--dim);font-size:12px"></span><em id="vpos"></em></h2>
     <div style="position:relative">
       <video id="v" controls preload="metadata"></video>
       <div id="card" hidden>
@@ -313,10 +322,9 @@ const DEFAULT_UNIT = 0.1;   // .vsm default; .dvw overrides to 1 (whole seconds)
 /* ── state ───────────────────────────────────────────────── */
 
 const S = {
-  raw:null, plays:[], rallies:[], teams:{a:'Team A',b:'Team B'},
-  labels:{}, video:null, videoDur:0,
-  unit:DEFAULT_UNIT,
-  cal:{ anchors:[], sorted:[], fit:'linear', slope:DEFAULT_UNIT, offset:0, from:'uncalibrated' },
+  sources:[], videos:[], calSrc:0,
+  plays:[], rallies:[], labels:{}, comboRole:null,
+
   filt:{}, reel:[], src:'filter',
   clips:[], cur:-1, montage:false
 };
@@ -339,25 +347,127 @@ drop.querySelector('input').addEventListener('change', e => load([...e.target.fi
   e.preventDefault(); drop.classList.remove('hot'); }));
 drop.addEventListener('drop', e => { e.preventDefault(); load([...e.dataTransfer.files]); });
 
+/* ── sources ─────────────────────────────────────────────────
+   Each match is one source: a scout file plus its video. Plays keep a `src`
+   back-reference so every clip knows which file to cut from. Players are keyed
+   by team NAME rather than by the home/away code, because the same team can be
+   home in one match and away in the next.                                    */
+
+let nextSrcId = 0;
+const newCal = unit => ({ anchors:[], sorted:[], fit:'linear',
+                          slope:unit, offset:0, from:'file timestamps' });
+
 async function load(files){
+  const pending = [];
   for (const f of files){
     const ext = f.name.split('.').pop().toLowerCase();
     try {
-      if (['mp4','mov','m4v'].includes(ext)) loadVideo(f);
-      else if (ext === 'dvw')                await loadDvw(f);
-      else                                   await loadVsm(f);
+      if (['mp4','mov','m4v'].includes(ext)) pending.push({ kind:'video', file:f });
+      else if (ext === 'dvw') pending.push({ kind:'scout',
+        M: parseDvw((await f.text()).replace(/^\uFEFF/,''), f.name) });
+      else pending.push({ kind:'scout',
+        M: parseVsm((await f.text()).replace(/^\uFEFF/,''), f.name) });
     } catch(err){ alert(`${f.name}: ${err.message||err}`); }
   }
+  for (const x of pending) if (x.kind === 'scout'){
+    x.M.id = nextSrcId++;
+    x.M.cal = newCal(x.M.unit);
+    S.sources.push(x.M);
+  }
+  for (const x of pending) if (x.kind === 'video') S.videos.push(x.file);
+  autoPair();
+  await measureVideos();
+  rebuild();
   render();
 }
 
-function loadVideo(f){
-  const v = $('v');
-  if (v.src) URL.revokeObjectURL(v.src);
-  v.src = URL.createObjectURL(f);
-  S.video = f; S.mp4 = null;
-  v.addEventListener('loadedmetadata', () => { S.videoDur = v.duration; render(); }, { once:true });
+/* Match each video to a scout file by shared filename tokens — these exports
+   usually share a date and team abbreviations. Anything unmatched is left for
+   the user to assign. */
+function autoPair(){
+  const toks = n => new Set(n.toLowerCase().replace(/\.[^.]+$/,'')
+    .split(/[^a-z0-9]+/).filter(t => t.length > 1));
+  const free = S.videos.filter(v => !S.sources.some(m => m.videoFile === v));
+  for (const M of S.sources){
+    if (M.videoFile) continue;
+    const a = toks(M.scoutName);
+    let best = null, bestScore = 0;
+    for (const v of free){
+      if (S.sources.some(m => m.videoFile === v)) continue;
+      const b = toks(v.name);
+      let hit = 0; a.forEach(t => { if (b.has(t)) hit++; });
+      if (hit > bestScore){ bestScore = hit; best = v; }
+    }
+    if (best && bestScore > 0){ M.videoFile = best; M.videoName = best.name; }
+  }
+  // Single pair with no shared tokens: the only sensible assignment is the obvious one.
+  if (S.sources.length === 1 && S.videos.length === 1 && !S.sources[0].videoFile){
+    S.sources[0].videoFile = S.videos[0];
+    S.sources[0].videoName = S.videos[0].name;
+  }
 }
+
+/* Read duration off each video without decoding it. */
+function measureVideos(){
+  return Promise.all(S.sources.filter(M => M.videoFile && !M.videoDur).map(M =>
+    new Promise(res => {
+      const el = document.createElement('video');
+      el.preload = 'metadata';
+      el.onloadedmetadata = () => { M.videoDur = el.duration; URL.revokeObjectURL(el.src); res(); };
+      el.onerror = () => { M.videoError = 'could not read this video'; res(); };
+      el.src = URL.createObjectURL(M.videoFile);
+    })));
+}
+
+function removeSource(id){
+  S.sources = S.sources.filter(M => M.id !== id);
+  S.reel = S.reel.filter(r => r.src !== id);
+  S.filt = {};
+  rebuild(); render();
+}
+
+/* Flatten every source into the single arrays the rest of the app works on. */
+function rebuild(){
+  const plays = [], rallies = [];
+  S.labels = {}; S.comboRole = null;
+  for (const M of S.sources){
+    if (!M.videoFile) continue;                     // unpaired: nothing to cut from
+    Object.assign(S.labels, M.labels);
+    if (M.comboRole) S.comboRole = Object.assign(S.comboRole || {}, M.comboRole);
+    const pBase = plays.length, rBase = rallies.length;
+    M.rallies.forEach(r => rallies.push({ id: rallies.length, set: r.set, src: M.id,
+      first: r.first + pBase, last: r.last + pBase, ev: r.ev }));
+    M.plays.forEach(p => plays.push(Object.assign({}, p, {
+      i: plays.length, rally: p.rally + rBase, src: M.id,
+      teamName: M.teams[p.team] || p.team })));
+  }
+  S.plays = plays; S.rallies = rallies;
+  mergeRosters();
+  if (plays.length){
+    computeRoles();
+    plays.forEach(p => { p.phase = phaseOf(p, plays, rallies); });
+  }
+}
+
+/* One roster across all matches, keyed by team name + jersey. */
+function mergeRosters(){
+  const roster = {}, rosterPos = {}, liberos = new Set();
+  for (const M of S.sources){
+    for (const [code, list] of Object.entries(M.rosters || {})){
+      const team = M.teams[code];
+      for (const pl of list){
+        const k = team + '|' + pl.number;
+        if (pl.name) roster[k] = pl.name;
+        if (pl.position) rosterPos[k] = pl.position;
+        if (pl.libero) liberos.add(k);
+      }
+    }
+  }
+  S.roster = roster; S.rosterPos = rosterPos; S.liberos = liberos;
+}
+
+const pkey = p => p.teamName + '|' + p.player;
+const srcOf = p => S.sources.find(M => M.id === p.src);
 
 /* Read code→label tables defensively; VolleyStation field names vary by version. */
 function codeTable(arr){
@@ -384,17 +494,17 @@ function jerseysOf(team){
     pad2(p.number ?? p.shirtNumber ?? p.shirt ?? '')).filter(x => x !== '00' || true));
 }
 
-function resolveSides(d, plays){
+function resolveSides(M, d){
+  const plays = M.plays;
   const codes = [...new Set(plays.map(p => p.team).filter(Boolean))].sort();
   const home = d.team?.home, away = d.team?.away;
-  S.codes = codes;
 
   // 1. Explicit code on the team object.
   const hc = home?.code ?? home?.id ?? home?.key;
   const ac = away?.code ?? away?.id ?? away?.key;
   if (hc && ac && codes.includes(String(hc)) && codes.includes(String(ac)) && hc !== ac){
-    S.codeOf = { home: String(hc), away: String(ac) };
-    S.sideSrc = 'explicit code on the team object';
+    M.codeOf = { home: String(hc), away: String(ac) };
+    M.sideSrc = 'explicit code on the team object';
   } else {
     // 2. Jersey overlap. Score each assignment by how much of each code's observed
     //    jersey set is actually on that roster.
@@ -410,46 +520,43 @@ function resolveSides(d, plays){
     const [c0, c1] = codes;
     const straight = score(seen[c0]||new Set(), hj) + score(seen[c1]||new Set(), aj);
     const swapped  = score(seen[c0]||new Set(), aj) + score(seen[c1]||new Set(), hj);
-    S.codeOf = straight >= swapped
+    M.codeOf = straight >= swapped
       ? { home: c0, away: c1 }
       : { home: c1, away: c0 };
-    S.sideConf = Math.abs(straight - swapped) / 2;
-    S.sideSrc = `jersey overlap (${(Math.max(straight,swapped)/2*100).toFixed(0)}% match, ` +
-                `margin ${(S.sideConf*100).toFixed(0)} pts)`;
-    if (S.sideConf < 0.15) S.sideSrc += ' \u2014 rosters share too many numbers to be sure';
+    M.sideConf = Math.abs(straight - swapped) / 2;
+    M.sideSrc = `jersey overlap (${(Math.max(straight,swapped)/2*100).toFixed(0)}% match, ` +
+                `margin ${(M.sideConf*100).toFixed(0)} pts)`;
+    if (M.sideConf < 0.15) M.sideSrc += ' \u2014 rosters share too many numbers to be sure';
   }
-  if (S.swapped) S.codeOf = { home: S.codeOf.away, away: S.codeOf.home };
-  S.sideOf = { [S.codeOf.home]:'home', [S.codeOf.away]:'away' };
+  if (M.swapped) M.codeOf = { home: M.codeOf.away, away: M.codeOf.home };
 }
 
-function buildRoster(d){
-  const roster = {}, rosterPos = {}, liberos = new Set();
-  S.teams = {};
+function buildRosterFor(M, d){
+  M.teams = {}; M.rosters = {};
   for (const side of ['home','away']){
     const t = (d.team||{})[side];
-    const k = S.codeOf?.[side];
+    const k = M.codeOf?.[side];
     if (!t || !k) continue;
-    S.teams[k] = t.name || t.code || side;
-    (t.libero||[]).forEach(n => liberos.add(k + pad2(n)));
+    M.teams[k] = t.name || t.code || side;
+    const list = [];
+    const lib = new Set((t.libero||[]).map(pad2));
     (t.players||[]).forEach(p => {
       const num = pad2(p.number ?? p.shirtNumber ?? p.shirt ?? '');
-      const nm  = [p.firstName, p.lastName].filter(Boolean).join(' ') || p.name || '';
-      roster[k + num] = nm;
-      if (p.position != null) rosterPos[k + num] = String(p.position);
-      if (p.libero || p.isLibero) liberos.add(k + num);
+      list.push({ number: num,
+        name: [p.firstName, p.lastName].filter(Boolean).join(' ') || p.name || '',
+        position: p.position != null ? String(p.position) : null,
+        libero: !!(p.libero || p.isLibero) || lib.has(num) });
     });
+    M.rosters[k] = list;
   }
-  S.roster = roster; S.rosterPos = rosterPos; S.liberos = liberos;
 }
 
-function swapSides(){
-  S.swapped = !S.swapped;
-  S.codeOf = { home: S.codeOf.away, away: S.codeOf.home };
-  S.sideOf = { [S.codeOf.home]:'home', [S.codeOf.away]:'away' };
-  buildRoster(S.raw);
-  computeRoles();
+function swapSides(M){
+  M.swapped = !M.swapped;
+  M.codeOf = { home: M.codeOf.away, away: M.codeOf.home };
+  buildRosterFor(M, M.raw);
   S.filt = {};
-  render();
+  rebuild(); render();
 }
 
 /* ── position ────────────────────────────────────────────────
@@ -458,9 +565,9 @@ function swapSides(){
    role from what the player actually did. Derivation leans on the fact that middle
    routes carry L-prefix combinations on the attack touch.                       */
 
-const POS_ORDER = ['Setter','Outside','Middle','Opposite','Libero','Attacker','Reserve'];
+const POS_ORDER = ['Setter','Outside','Middle','Opposite','Libero','Defense','Reserve'];
 const POS_ABBR  = { Setter:'S', Outside:'OH', Middle:'MB', Opposite:'OPP',
-                    Libero:'L', Attacker:'HIT', Reserve:'\u2013' };
+                    Libero:'L', Defense:'DS', Reserve:'\u2013' };
 
 function normPos(s){
   const x = String(s).toLowerCase();
@@ -472,14 +579,23 @@ function normPos(s){
   return null;
 }
 
+/* Which position an attack route belongs to. DVW states it outright; the .vsm
+   does not, so there we fall back to the L-prefix middle-route convention. */
+function attackRole(p){
+  if (p.skill !== 'A' || !p.combination) return null;
+  if (S.comboRole && S.comboRole[p.combination]) return S.comboRole[p.combination];
+  return /^L/.test(p.combination) ? 'C' : null;
+}
+
 function computeRoles(){
   const stat = {};
   S.plays.forEach(p => {
     if (!p.player) return;
-    const k = p.team + p.player;
-    const r = stat[k] || (stat[k] = { set:0, att:0, mid:0, rec:0, dig:0, srv:0 });
+    const k = pkey(p);
+    const r = stat[k] || (stat[k] = { set:0, att:0, rec:0, dig:0, srv:0,
+                                      C:0, F:0, B:0, P:0 });
     if (p.skill === 'E') r.set++;
-    if (p.skill === 'A'){ r.att++; if (/^L/.test(p.combination||'')) r.mid++; }
+    if (p.skill === 'A'){ r.att++; const a = attackRole(p); if (a && r[a] != null) r[a]++; }
     if (p.skill === 'R') r.rec++;
     if (p.skill === 'D') r.dig++;
     if (p.skill === 'S') r.srv++;
@@ -495,11 +611,28 @@ function computeRoles(){
     const r = stat[k];
     how[k] = 'derived';
     if (!r || (r.set + r.att + r.rec + r.dig + r.srv) < 4) { roles[k] = 'Reserve'; continue; }
+    // A libero never attacks and never serves; a DS does one or the other but
+    // still lives in the back row. Without this split, defensive starters were
+    // falling through to Reserve.
     if (r.att === 0 && r.srv === 0 && (r.rec + r.dig) >= 8) { roles[k] = 'Libero'; continue; }
-    if (r.set >= 12 && r.set > r.att * 2)                   { roles[k] = 'Setter'; continue; }
-    if (r.att >= 6 && r.mid / r.att > 0.5)                  { roles[k] = 'Middle'; continue; }
-    // Outside hitters pass; opposites largely do not. Weak but better than nothing.
-    if (r.att >= 6) { roles[k] = r.rec >= r.att * 0.4 ? 'Outside' : 'Opposite'; continue; }
+    // Sets outnumbering attacks identifies a 6-2's second setter, who also hits.
+    if (r.set >= 12 && r.set > r.att)                       { roles[k] = 'Setter'; continue; }
+
+    // Vote on the routes the player actually ran. Pipe is excluded: both wings
+    // and opposites hit it, so it discriminates nothing.
+    const votes = { Middle: r.C, Outside: r.F, Opposite: r.B };
+    const total = votes.Middle + votes.Outside + votes.Opposite;
+    if (total >= 3){
+      const rank = Object.entries(votes).sort((a,b) => b[1]-a[1]);
+      roles[k] = rank[0][0];
+      // Flag a close call so the diagnostics can admit it rather than assert it.
+      how[k] = (rank[1] && rank[1][1] > rank[0][1] * 0.6) ? 'routes (mixed)' : 'routes';
+      continue;
+    }
+    // No coded routes to go on. Outsides pass, opposites largely do not — weak,
+    // and only reached when the route evidence is missing.
+    if (r.att >= 6) { roles[k] = r.rec >= r.att * 0.4 ? 'Outside' : 'Opposite'; how[k] = 'derived (no route codes)'; continue; }
+    if (r.att < 4 && (r.rec + r.dig) >= 8) { roles[k] = 'Defense'; continue; }
     roles[k] = 'Reserve';
   }
   S.roles = roles; S.roleSrc = how;
@@ -512,8 +645,8 @@ function computeRoles(){
 
 const sideOf = p => {
   const s = p.toLowerCase();
-  if (/away|visit|guest|teamb/.test(s)) return S.codeOf?.away ?? 'b';
-  if (/home|teama/.test(s))             return S.codeOf?.home ?? 'a';
+  if (/away|visit|guest|teamb/.test(s)) return sideOf.M?.codeOf?.away ?? 'b';
+  if (/home|teama/.test(s))             return sideOf.M?.codeOf?.home ?? 'a';
   const m = s.match(/\/([ab])(\/|$)/);
   return m ? m[1] : null;
 };
@@ -545,7 +678,7 @@ function scanEvent(ev){
   return { arrays, ints };
 }
 
-function computeRotations(rallies, plays){
+function computeRotations(rallies, plays, M){
   // Setter identity per (set, team): the player with the most set touches.
   const tally = {};
   plays.forEach(p => { if (p.skill === 'E' && p.player){
@@ -556,6 +689,7 @@ function computeRotations(rallies, plays){
     if (!setter[kk] || n > setter[kk].n) setter[kk] = { player: pl, n };
   }
 
+  sideOf.M = M;
   let method = null, hit = 0;
   for (const r of rallies){
     const { arrays, ints } = scanEvent(r.ev);
@@ -625,51 +759,49 @@ function dvwCode(c){
   return { team: c[0], player, skill, hitType: c[4], effect: c[5], combination };
 }
 
-async function loadDvw(f){
-  const lines = (await f.text()).replace(/^\uFEFF/,'').split(/\r?\n/);
-  S.file = f; S.unit = 1;                            // video time is in seconds
-
+function parseDvw(text, name){
+  const lines = text.split(/\r?\n/);
   const teamRows = dvwSection(lines, '3TEAMS');
   const mkPlayers = rows => rows.map(r => ({
-    number: r[1],
-    firstName: r[10] || '', lastName: r[9] || '',
+    number: (r[1]||'').padStart(2,'0'),
+    name: [r[10], r[9]].filter(Boolean).join(' '),
     position: r[12] || null,
     libero: (r[12] || '').toUpperCase() === 'L'
-  })).filter(p => p.number);
+  })).filter(p => p.number.trim());
 
-  // `*` is always the home team in DataVolley — no inference required.
-  S.raw = { team: {
-    home: { name: (teamRows[0]||[])[1] || 'Home', code: '*',
-            players: mkPlayers(dvwSection(lines, '3PLAYERS-H')) },
-    away: { name: (teamRows[1]||[])[1] || 'Away', code: 'a',
-            players: mkPlayers(dvwSection(lines, '3PLAYERS-V')) } } };
-
-  S.labels = {};
-  for (const r of dvwSection(lines, '3ATTACKCOMBINATION')) if (r[0]) S.labels[r[0]] = r[4] || r[0];
-  for (const r of dvwSection(lines, '3SETTERCALL'))        if (r[0]) S.labels[r[0]] = r[2] || r[0];
-
-  const scout = dvwSection(lines, '3SCOUT');
-  const plays = [], rallies = [];
-  let first = plays.length, vids = new Set();
-
-  const closeRally = () => {
-    if (plays.length > first)
-      rallies.push({ id: rallies.length, set: plays[first].set,
-                     first, last: plays.length-1, ev: null });
-    first = plays.length;
+  const M = {
+    scoutName: name, videoFile: null, videoName: null, videoDur: 0,
+    unit: 1,                                          // video time in whole seconds
+    format: 'dvw',
+    teams: { '*': (teamRows[0]||[])[1] || 'Home', 'a': (teamRows[1]||[])[1] || 'Away' },
+    rosters: { '*': mkPlayers(dvwSection(lines, '3PLAYERS-H')),
+               'a': mkPlayers(dvwSection(lines, '3PLAYERS-V')) },
+    labels: {}, comboRole: {}, plays: [], rallies: []
   };
 
-  for (const r of scout){
+  // Column 8 of the combination table states which position runs each route.
+  for (const r of dvwSection(lines, '3ATTACKCOMBINATION')){
+    if (!r[0]) continue;
+    M.labels[r[0]] = r[4] || r[0];
+    if (r[8]) M.comboRole[r[0]] = r[8].trim().toUpperCase();
+  }
+  for (const r of dvwSection(lines, '3SETTERCALL')) if (r[0]) M.labels[r[0]] = r[2] || r[0];
+
+  let first = 0;
+  const closeRally = () => {
+    if (M.plays.length > first)
+      M.rallies.push({ set: M.plays[first].set, first, last: M.plays.length-1, ev: null });
+    first = M.plays.length;
+  };
+  for (const r of dvwSection(lines, '3SCOUT')){
     const code = r[0] || '';
-    // A point row terminates the rally: *p05:03 / ap00:01
     if (/^[*a]p\d+:\d+/.test(code)){ closeRally(); continue; }
     const c = dvwCode(code);
     if (!c) continue;
     const t = parseInt(r[12], 10);
     if (!Number.isFinite(t)) continue;
-    if (r[11]) vids.add(r[11]);
-    plays.push({
-      i: plays.length, rally: rallies.length, seq: plays.length - first,
+    M.plays.push({
+      i: M.plays.length, rally: M.rallies.length, seq: M.plays.length - first,
       set: parseInt(r[8],10) || 1, team: c.team, player: c.player,
       skill: c.skill, hitType: c.hitType, effect: c.effect,
       combination: c.combination, raw: t,
@@ -677,68 +809,52 @@ async function loadDvw(f){
     });
   }
   closeRally();
-  if (!plays.length) throw new Error('no usable touches found in [3SCOUT]');
+  if (!M.plays.length) throw new Error('no usable touches found in [3SCOUT]');
 
-  S.plays = plays; S.rallies = rallies;
-  resolveSides(S.raw, plays);
-  buildRoster(S.raw);
-  computeRoles();
-  plays.forEach(p => { p.phase = phaseOf(p, plays, rallies); });
-
-  const withRot = plays.filter(p => p.rot).length;
-  S.rotInfo = { method: 'setter position column', hit: withRot, total: plays.length,
-                setter: {}, perPlay: true };
-  S.videoFiles = [...vids];
-  S.rawMin = Math.min(...plays.map(p => p.raw));   // informational only
-  S.cal.anchors = []; S.cal.sorted = [];
-  recalc();
-  S.filt = {}; S.reel = [];
+  M.rotInfo = { method: 'setter position column',
+                hit: M.plays.filter(p => p.rot).length, total: M.plays.length };
+  M.rawMin = Math.min(...M.plays.map(p => p.raw));
+  return M;
 }
 
-async function loadVsm(f){
-  let txt = await f.text();
-  if (txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);
-  const d = JSON.parse(txt);
-  S.raw = d; S.file = f; S.unit = 0.1;   // deciseconds
+function parseVsm(text, name){
+  const d = JSON.parse(text);
+  const M = {
+    scoutName: name, videoFile: null, videoName: null, videoDur: 0,
+    unit: 0.1,                                        // deciseconds
+    format: 'vsm', raw: d,
+    labels: Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls)),
+    comboRole: null,                                  // .vsm has no route/position column
+    teams: {}, rosters: {}, plays: [], rallies: []
+  };
 
-  S.labels = Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls));
-
-  const plays = [], rallies = [];
   (d.scout?.sets || []).forEach((st, si) => {
     (st.events || []).forEach(ev => {
       const ps = ev.exchange?.plays;
-      if (!ps || !ps.length) return;              // skip timeouts, subs, non-rally events
-      const rid = rallies.length;
-      const first = plays.length;
-      ps.forEach((p, k) => {
-        plays.push({
-          i: plays.length, rally: rid, seq: k, set: si+1,
-          team: p.team, player: String(p.player ?? ''),
-          skill: p.skill, hitType: p.hitType, effect: p.effect,
-          combination: p.combination, raw: p.time
-        });
-      });
-      rallies.push({ id: rid, set: si+1, first, last: plays.length-1, ev });
+      if (!ps || !ps.length) return;                  // timeouts, subs, non-rally events
+      const rid = M.rallies.length, first = M.plays.length;
+      ps.forEach((p, k) => M.plays.push({
+        i: M.plays.length, rally: rid, seq: k, set: si+1,
+        team: p.team, player: String(p.player ?? ''),
+        skill: p.skill, hitType: p.hitType, effect: p.effect,
+        combination: p.combination, raw: p.time
+      }));
+      M.rallies.push({ set: si+1, first, last: M.plays.length-1, ev });
     });
   });
-  if (!plays.length) throw new Error('no plays found under scout.sets[].events[].exchange.plays[]');
+  if (!M.plays.length)
+    throw new Error('no plays found under scout.sets[].events[].exchange.plays[]');
 
-  S.plays = plays; S.rallies = rallies;
-  resolveSides(d, plays);
-  buildRoster(d);
-  computeRoles();
-  S.rotInfo = computeRotations(rallies, plays);
-  plays.forEach(p => {
-    p.rot   = rallies[p.rally].rot?.[p.team] ?? null;
-    p.phase = phaseOf(p, plays, rallies);
-  });
-  const raws = plays.map(p => p.raw).filter(x => Number.isFinite(x));
-  if (raws.length !== plays.length)
-    console.warn(`${plays.length - raws.length} plays carry no usable time value`);
-  S.rawMin = Math.min(...raws);
-  S.cal.anchors = []; S.cal.sorted = [];
-  recalc();
-  S.filt = {};
+  resolveSides(M, d);
+  buildRosterFor(M, d);
+  M.rotInfo = computeRotations(M.rallies, M.plays, M);
+  M.plays.forEach(p => { p.rot = M.rallies[p.rally].rot?.[p.team] ?? null; });
+
+  const raws = M.plays.map(p => p.raw).filter(x => Number.isFinite(x));
+  if (raws.length !== M.plays.length)
+    console.warn(`${M.plays.length - raws.length} plays carry no usable time value`);
+  M.rawMin = Math.min(...raws);
+  return M;
 }
 
 /* ── time mapping ────────────────────────────────────────── */
@@ -747,11 +863,11 @@ async function loadVsm(f){
    seconds, VSM deciseconds, both measured from the start of the recording. So
    the identity mapping (offset 0, slope = unit) is already correct and no
    calibration is needed. Anchors exist only to correct a file that is wrong. */
-const linPred = raw => S.cal.offset + raw * S.cal.slope;
+const linPred = (raw, cal) => cal.offset + raw * cal.slope;
 
-function mapRaw(raw){
-  const A = S.cal.sorted || [];
-  if (S.cal.fit === 'piecewise' && A.length >= 2){
+function mapRaw(raw, cal){
+  const A = cal.sorted || [];
+  if (cal.fit === 'piecewise' && A.length >= 2){
     const seg = i => (A[i+1].v - A[i].v) / (A[i+1].raw - A[i].raw);
     if (raw <= A[0].raw)               return A[0].v + (raw - A[0].raw) * seg(0);
     for (let i = 0; i < A.length-1; i++)
@@ -759,13 +875,17 @@ function mapRaw(raw){
     const L = A.length-1;
     return A[L].v + (raw - A[L].raw) * seg(L-1);
   }
-  return linPred(raw);
+  return linPred(raw, cal);
 }
-const vt = p => mapRaw(p.raw);
+/* Every play resolves against its own match's mapping. */
+const vt = p => { const M = srcOf(p); return M ? mapRaw(p.raw, M.cal) : 0; };
 
-function recalc(){
-  const A = S.cal.anchors;
-  S.cal.sorted = [...A].sort((x,y) => x.raw - y.raw);
+function recalc(cal, unit){
+  cal = cal || S.sources[S.calSrc]?.cal;
+  if (!cal) return;
+  unit = unit || S.sources[S.calSrc]?.unit || 0.1;
+  const A = cal.anchors;
+  cal.sorted = [...A].sort((x,y) => x.raw - y.raw);
 
   if (A.length >= 2){
     const n = A.length;
@@ -773,24 +893,26 @@ function recalc(){
     const my = A.reduce((s,p) => s+p.v,   0)/n;
     let num = 0, den = 0;
     A.forEach(p => { num += (p.raw-mx)*(p.v-my); den += (p.raw-mx)**2; });
-    S.cal.slope  = den ? num/den : S.unit;
-    S.cal.offset = my - mx * S.cal.slope;
-    S.cal.from   = `${n} anchors`;
+    cal.slope  = den ? num/den : unit;
+    cal.offset = my - mx * cal.slope;
+    cal.from   = `${n} anchors`;
   } else if (A.length === 1){
-    S.cal.slope  = S.unit;
-    S.cal.offset = A[0].v - A[0].raw * S.unit;
-    S.cal.from   = '1 anchor offset';
+    cal.slope  = unit;
+    cal.offset = A[0].v - A[0].raw * unit;
+    cal.from   = '1 anchor offset';
   } else {
-    S.cal.slope  = S.unit;
-    S.cal.offset = 0;
-    S.cal.from   = 'file timestamps';
+    cal.slope  = unit;
+    cal.offset = 0;
+    cal.from   = 'file timestamps';
   }
 }
 
 function describe(p){
   const num = p.player ? '#' + p.player.replace(/^0+(?=\d)/,'') : '';
   const combo = p.combination ? ' ' + p.combination : '';
-  return `S${p.set} · ${S.teams[p.team]||p.team} ${num} ${SKILL[p.skill]||p.skill}${combo} ${p.effect||''}`;
+  const multi = S.sources.filter(M => M.videoFile).length > 1;
+  const tag = multi ? `M${S.sources.findIndex(M => M.id === p.src)+1} · ` : '';
+  return `${tag}S${p.set} · ${p.teamName} ${num} ${SKILL[p.skill]||p.skill}${combo} ${p.effect||''}`;
 }
 
 /* ── calibration UI ──────────────────────────────────────── */
@@ -802,16 +924,26 @@ $('calSeek').onclick = () => {
 $('calAdd').onclick = () => {
   const p = S.plays[+$('calPick').value];
   if (!p) return;
-  S.cal.anchors = S.cal.anchors.filter(a => a.raw !== p.raw);
-  S.cal.anchors.push({ raw: p.raw, v: $('v').currentTime, set: p.set, label: describe(p) });
-  recalc(); render();
+  const M = srcOf(p); if (!M) return;
+  M.cal.anchors = M.cal.anchors.filter(a => a.raw !== p.raw);
+  M.cal.anchors.push({ raw: p.raw, v: $('v').currentTime, set: p.set, label: describe(p) });
+  recalc(M.cal, M.unit); render();
 };
-$('calClear').onclick = () => { S.cal.anchors = []; recalc(); render(); };
-$('calFit').onchange = () => { S.cal.fit = $('calFit').value; render(); };
+$('calClear').onclick = () => { const M = calM(); if (M){ M.cal.anchors = []; recalc(M.cal, M.unit);} render(); };
+$('calFit').onchange = () => { const M = calM(); if (M) M.cal.fit = $('calFit').value; render(); };
+
+/* Anchors belong to whichever match the selected touch came from. */
+function calM(){
+  const p = S.plays[+$('calPick').value];
+  return (p && srcOf(p)) || S.sources.find(M => M.videoFile) || null;
+}
 
 function renderCal(){
+  const CM = calM();
+  if (!CM) return;
+  const cal = CM.cal, unit = CM.unit;
   const sel = $('calPick');
-  const sig = [S.plays.length, S.cal.slope, S.cal.offset, S.cal.fit, S.cal.anchors.length].join('|');
+  const sig = [S.plays.length, cal.slope, cal.offset, cal.fit, cal.anchors.length].join('|');
   if (sel.dataset.sig !== sig){
     sel.dataset.sig = sig;
     const keep = sel.value;
@@ -844,15 +976,15 @@ function renderCal(){
     r.insertCell().textContent = k;
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
 
-  const A = S.cal.sorted || [];
+  const A = cal.sorted || [];
   if (!A.length) add('mapping',
     `<span class="ok">using the file's own video timestamps directly</span> ` +
-    `<span style="color:#7d8896">\u2014 ${S.unit === 1 ? 'seconds' : 'deciseconds'} ` +
+    `<span style="color:#7d8896">\u2014 ${unit === 1 ? 'seconds' : 'deciseconds'} ` +
     `from the start of the recording. Add anchors only if clips land wrong.</span>`);
 
   let rms = 0, worst = null;
   A.forEach((a, i) => {
-    const res = linPred(a.raw) - a.v;
+    const res = linPred(a.raw, cal) - a.v;
     rms += res*res;
     if (!worst || Math.abs(res) > Math.abs(worst.res)) worst = { res, a };
     const cls = Math.abs(res) < 0.6 ? 'ok' : Math.abs(res) < 2 ? 'warn' : 'bad';
@@ -863,20 +995,20 @@ function renderCal(){
   });
   rms = A.length >= 2 ? Math.sqrt(rms / A.length) : null;
 
-  add('fit', S.cal.from, A.length >= 2 ? 'ok' : A.length ? 'warn' : 'ok');
-  add('slope', `${S.cal.slope.toFixed(6)} s per raw unit`);
+  add('fit', cal.from, A.length >= 2 ? 'ok' : A.length ? 'warn' : 'ok');
+  add('slope', `${cal.slope.toFixed(6)} s per raw unit`);
 
   if (A.length >= 2){
-    const drift = (S.cal.slope / S.unit - 1) * 100;
-    const acc = Math.abs(drift/100) * (S.videoDur || 0);
-    add(S.unit === 1 ? 'vs. seconds' : 'vs. deciseconds',
+    const drift = (cal.slope / unit - 1) * 100;
+    const acc = Math.abs(drift/100) * (CM.videoDur || 0);
+    add(unit === 1 ? 'vs. seconds' : 'vs. deciseconds',
       `${drift>=0?'+':''}${drift.toFixed(4)}% \u2014 ${acc.toFixed(1)} s across the recording`,
       acc < 1 ? 'ok' : acc < 5 ? 'warn' : 'bad');
     add('residual RMS', `${rms.toFixed(2)} s \u00b7 worst ${worst.res>=0?'+':''}` +
       `${worst.res.toFixed(2)} s in set ${worst.a.set}`,
       rms < 0.6 ? 'ok' : rms < 2 ? 'warn' : 'bad');
 
-    const span = (A[A.length-1].raw - A[0].raw) * S.unit;
+    const span = (A[A.length-1].raw - A[0].raw) * unit;
     if (span < 600)
       add('note', 'Anchors span under 10 minutes \u2014 the slope is poorly constrained. ' +
         'Put one in set 1 and one in the last set.', 'warn');
@@ -906,8 +1038,10 @@ function facets(){
     F.push({ key, values: keys.map(v => ({ v, n: m.get(v) })) });
   };
 
+  if (S.sources.filter(M => M.videoFile).length > 1)
+    tally('match', p => p.src, (a,b) => a-b);
   tally('set',    p => p.set, (a,b) => a-b);
-  tally('team',   p => p.team, (a,b) => a<b?-1:1);
+  tally('team',   p => p.teamName, (a,b) => a<b?-1:1);
   tally('rotation', p => p.rot ? 'S'+p.rot : null, (a,b) => a<b?-1:1);
   tally('phase',  p => p.phase,
         (a,b) => ['Serve','Reception','Transition','Freeball'].indexOf(a) -
@@ -924,18 +1058,18 @@ function facets(){
 
   // One group per team, ordered by position then jersey — a flat count-sorted
   // list of both rosters interleaved is unreadable.
-  const jersey = k => parseInt(k.slice(1), 10) || 0;
+  const jersey = k => parseInt(k.split('|')[1], 10) || 0;
   const byRole = (a,b) => {
     const d = POS_ORDER.indexOf(S.roles[a]||'Reserve') - POS_ORDER.indexOf(S.roles[b]||'Reserve');
     return d || jersey(a) - jersey(b);
   };
-  [...new Set(S.plays.map(p => p.team))].sort().forEach(t =>
-    tally('player@'+t, p => p.team === t && p.player ? t + p.player : null, byRole));
+  [...new Set(S.plays.map(p => p.teamName))].sort().forEach(t =>
+    tally('player@'+t, p => p.teamName === t && p.player ? pkey(p) : null, byRole));
   return F;
 }
 
 const FACET_TITLE = {
-  set:'Set', team:'Team', skill:'Skill',
+  match:'Match', set:'Set', team:'Team', skill:'Skill',
   rotation:'Rotation \u2014 own team, named by setter zone',
   phase:'Phase \u2014 what started the possession',
   call:'Setter call (on the set touch)',
@@ -944,17 +1078,23 @@ const FACET_TITLE = {
 };
 
 const facetTitle = key => key.startsWith('player@')
-  ? `${S.teams[key.slice(7)] || key.slice(7)} \u2014 players`
+  ? `${key.slice(7)} \u2014 players`
   : (FACET_TITLE[key] || key);
+const matchLabel = id => {
+  const M = S.sources.find(x => x.id === id);
+  if (!M) return 'match ' + id;
+  return Object.values(M.teams || {}).join(' v ') || M.scoutName;
+};
 
 function facetLabel(key, v){
   if (key.startsWith('player@')){
     const abbr = POS_ABBR[S.roles[v] || 'Reserve'] || '';
     const nm = S.roster[v] || '';
-    return `#${v.slice(1).replace(/^0+(?=\d)/,'')} ${abbr}` + (nm ? ' ' + nm : '');
+    return `#${v.split('|')[1].replace(/^0+(?=\d)/,'')} ${abbr}` + (nm ? ' ' + nm : '');
   }
+  if (key === 'match') return matchLabel(v);
   if (key === 'skill')  return SKILL[v] || v;
-  if (key === 'team')   return S.teams[v] || v;
+
   if (key === 'effect') return `${v} ${EFFECT[v]||''}`.trim();
   if (key === 'call' || key === 'attack')
     return S.labels[v] ? `${v} ${S.labels[v]}` : v;
@@ -963,10 +1103,11 @@ function facetLabel(key, v){
 
 function facetValue(p, key){
   if (key.startsWith('player@'))
-    return p.team === key.slice(7) && p.player ? p.team + p.player : null;
+    return p.teamName === key.slice(7) && p.player ? pkey(p) : null;
   switch(key){
+    case 'match': return p.src;
     case 'set': return p.set;
-    case 'team': return p.team;
+    case 'team': return p.teamName;
     case 'skill': return p.skill;
     case 'rotation': return p.rot ? 'S'+p.rot : null;
     case 'phase': return p.phase;
@@ -980,7 +1121,7 @@ function facetValue(p, key){
 
 /* Facets are split by how often they get used: the ones that answer most
    questions stay visible, rosters and code-level detail fold away. */
-const PRIMARY   = ['team','position','skill','attack','call','rotation','phase'];
+const PRIMARY   = ['match','team','position','skill','attack','call','rotation','phase'];
 const SECONDARY = ['set','hitType','effect'];
 
 function toggleFacet(key, v){
@@ -1117,15 +1258,17 @@ function buildClips(){
     const [a, b] = bounds(p, mode);
     let s = vt(a) - pre, e = vt(b) + post;
     if (e - s < min) e = s + min;
-    raw.push({ s: Math.max(0, s), e, p, m, rally: p.rally });
+    raw.push({ s: Math.max(0, s), e, p, m, rally: p.rally, src: p.src });
   }
-  raw.sort((x, y) => x.s - y.s);
+  raw.sort((x, y) => (x.src - y.src) || (x.s - y.s));
 
   // Merge overlaps so two selected touches in one rally give one clip, not two near-duplicates.
   const out = [];
   for (const c of raw){
     const last = out[out.length-1];
-    if (last && c.s <= last.e){
+    // Only merge overlaps inside the same match — identical timestamps in two
+    // different recordings are unrelated.
+    if (last && last.src === c.src && c.s <= last.e){
       last.e = Math.max(last.e, c.e);
       last.also = (last.also||0) + 1;
     } else out.push(Object.assign({}, c));
@@ -1173,8 +1316,8 @@ function reelClips(){
     const [a, b] = bounds(p, r.mode);
     let s = vt(a) - r.pre, e = vt(b) + r.post;
     if (e - s < r.min) e = s + r.min;
-    return { n: i+1, s: Math.max(0, s), e, m: S.plays[r.src], p,
-             rally: p.rally, label: r.label, section: r.section };
+    return { n: i+1, s: Math.max(0, s), e, m: S.plays[r.play], p,
+             rally: p.rally, src: p.src, label: r.label, section: r.section };
   });
 }
 
@@ -1184,7 +1327,7 @@ function addToReel(list){
         post = +$('post').value || 0, min = +$('minlen').value || 0;
   for (const c of list){
     if (S.reel.some(r => r.anchor === c.p.i && r.section === section)) continue;
-    S.reel.push({ anchor: c.p.i, src: c.m.i, mode, pre, post, min,
+    S.reel.push({ anchor: c.p.i, play: c.m.i, src: c.p.src, mode, pre, post, min,
                   section, label: c.label });
   }
   render();
@@ -1264,9 +1407,23 @@ const V = $('v');
 let cardTimer = null;
 function hideCard(){ clearTimeout(cardTimer); cardTimer = null; $('card').hidden = true; }
 
-function seekClip(i){
+/* Point the player at whichever match a clip belongs to, then seek. */
+function useVideo(srcId){
+  const M = S.sources.find(x => x.id === srcId);
+  if (!M || !M.videoFile) return Promise.resolve(false);
+  if (S.loadedSrc === srcId) return Promise.resolve(true);
+  return new Promise(res => {
+    if (V.src) URL.revokeObjectURL(V.src);
+    V.addEventListener('loadedmetadata', () => { S.loadedSrc = srcId; res(true); }, { once:true });
+    V.src = URL.createObjectURL(M.videoFile);
+    $('vsrc').textContent = matchLabel(srcId);
+  });
+}
+
+async function seekClip(i){
   const list = active(), c = list[i];
   if (!c) return;
+  await useVideo(c.src);
   const go = () => {
     V.currentTime = c.s + (+$('nudge').value || 0);
     $('nowPlaying').textContent = `${String(c.n).padStart(3,'0')}  ${c.label}`;
@@ -1707,9 +1864,24 @@ function clipSamples(v, startSec, endSec){
 
 async function exportMp4(clips, onProgress, opts){
   opts = opts || {};
-  const M = S.mp4;
-  if (!M || M.error) throw new Error(M?.error || 'video not parsed');
-  const v = M.video;
+  // Every match involved must be parsed, and they must agree on geometry —
+  // a resolution change mid-track is not reliably playable.
+  const ids = [...new Set(clips.map(c => c.src))];
+  for (const id of ids){
+    const src = S.sources.find(x => x.id === id);
+    if (!src) throw new Error('a clip refers to a match that is no longer loaded');
+    if (!src.mp4) src.mp4 = await parseMp4(src.videoFile);
+    if (src.mp4.error) throw new Error(`${src.videoName}: ${src.mp4.error}`);
+  }
+  const vids = ids.map(id => S.sources.find(x => x.id === id));
+  const v0 = vids[0].mp4.video;
+  const odd = vids.find(x => x.mp4.video.width !== v0.width || x.mp4.video.height !== v0.height);
+  if (odd) throw new Error(
+    `${odd.videoName} is ${odd.mp4.video.width}\u00d7${odd.mp4.video.height} but ` +
+    `${vids[0].videoName} is ${v0.width}\u00d7${v0.height}. Stream copy cannot change ` +
+    `resolution mid-file \u2014 export these matches separately.`);
+
+  const v = v0;
   const frameDur = v.dur[0] || Math.round(v.timescale/30);
 
   // One card per section, encoded up front.
@@ -1730,20 +1902,26 @@ async function exportMp4(clips, onProgress, opts){
     if (first && !cardPrefix) cardError = 'encoder returned no usable SPS/PPS';
   }
 
-  // Source parameter sets, re-asserted before every footage clip so a preceding
-  // card cannot leave the decoder configured with the wrong ones.
-  const srcPrefix = paramPrefix(avcCOf(v.sampleEntry));
-  const useCards = cardPrefix && srcPrefix &&
-                   cardPrefix.lengthSize === srcPrefix.lengthSize && !cardError;
-  if (cardPrefix && srcPrefix && cardPrefix.lengthSize !== srcPrefix.lengthSize)
+  // Parameter sets per match, re-asserted before every clip so neither a card
+  // nor a clip from a different recording leaves the decoder misconfigured.
+  const prefixOf = {};
+  for (const x of vids) prefixOf[x.id] = paramPrefix(avcCOf(x.mp4.video.sampleEntry));
+  const anyPrefix = Object.values(prefixOf)[0];
+  const multiMatch = vids.length > 1;
+  const useCards = cardPrefix && anyPrefix &&
+                   cardPrefix.lengthSize === anyPrefix.lengthSize && !cardError;
+  if (cardPrefix && anyPrefix && cardPrefix.lengthSize !== anyPrefix.lengthSize)
     cardError = 'NAL length size differs between source and encoder';
+  // With several recordings the parameter sets must be re-asserted regardless
+  // of whether title cards are in play.
+  const needPrefix = useCards || multiMatch;
 
   const sel = { size:[], dur:[], sync:[], cts: v.cts ? [] : null, perChunk:[], desc:[] };
   const parts = [];                             // output byte order: Blob slices and inline bytes
   let run = null, outPos = 0;
   const chunkOffsets = [];
   const placed = [];
-  const flushRun = () => { if (run){ parts.push(M.file.slice(run.start, run.end)); run = null; } };
+  const flushRun = () => { if (run){ parts.push(run.file.slice(run.start, run.end)); run = null; } };
 
   let lastSection = null, ci = 0;
   for (const c of clips){
@@ -1762,29 +1940,33 @@ async function exportMp4(clips, onProgress, opts){
     }
     lastSection = c.section;
 
-    const [a,b] = clipSamples(v, c.s, c.e);
+    const S0 = S.sources.find(x => x.id === c.src);
+    const vv = S0.mp4.video, file = S0.mp4.file;
+    const scale = v.timescale / vv.timescale;   // normalise onto one movie timescale
+    const [a,b] = clipSamples(vv, c.s, c.e);
     flushRun();
     chunkOffsets.push(outPos);
     sel.perChunk.push(b - a + 1);
     sel.desc.push(1);
-    placed.push({ n: ++ci, actualStart: v.dts[a]/v.timescale,
-                  actualEnd: (v.dts[b]+v.dur[b])/v.timescale, label: c.label });
+    placed.push({ n: ++ci, actualStart: vv.dts[a]/vv.timescale,
+                  actualEnd: (vv.dts[b]+vv.dur[b])/vv.timescale, label: c.label });
 
     for (let i = a; i <= b; i++){
-      if (i === a && useCards){
-        // Rewrite only this one frame, with the source parameter sets in front.
-        const raw = new Uint8Array(await M.file.slice(v.off[i], v.off[i] + v.size[i]).arrayBuffer());
-        const data = cat(srcPrefix.bytes, raw);
+      if (i === a && needPrefix){
+        // Rewrite this one frame with its own match's parameter sets in front.
+        const raw = new Uint8Array(await file.slice(vv.off[i], vv.off[i] + vv.size[i]).arrayBuffer());
+        const data = cat(prefixOf[c.src].bytes, raw);
         sel.size.push(data.length);
         parts.push(data); outPos += data.length;
       } else {
-        sel.size.push(v.size[i]);
-        if (run && run.end === v.off[i]) run.end += v.size[i];
-        else { flushRun(); run = { start: v.off[i], end: v.off[i] + v.size[i] }; }
-        outPos += v.size[i];
+        sel.size.push(vv.size[i]);
+        if (run && run.file === file && run.end === vv.off[i]) run.end += vv.size[i];
+        else { flushRun(); run = { file, start: vv.off[i], end: vv.off[i] + vv.size[i] }; }
+        outPos += vv.size[i];
       }
-      sel.dur.push(v.dur[i]); sel.sync.push(v.sync[i]);
-      if (sel.cts) sel.cts.push(v.cts[i]);
+      sel.dur.push(Math.max(1, Math.round(vv.dur[i] * scale)));
+      sel.sync.push(vv.sync[i]);
+      if (sel.cts) sel.cts.push(Math.round((vv.cts ? vv.cts[i] : 0) * scale));
     }
     if (onProgress) onProgress(ci/clips.length);
   }
@@ -1806,26 +1988,25 @@ async function exportMp4(clips, onProgress, opts){
 
   // Blob slices stay lazily backed by the file — no footage enters memory.
   return { blob: new Blob([ftyp, moov, mdatHdr, ...parts], { type:'video/mp4' }),
-           placed, bytes: outPos,
+           placed, bytes: outPos, matches: vids.length,
            cardFrames: useCards ? Object.values(cards).reduce((a,c)=>a+c.frames.length,0) : 0,
            cards: useCards ? Object.keys(cards).length : 0, cardError };
 }
 
 $('expMp4').onclick = async () => {
   const clips = exportList();
-  if (!clips.length || !S.video) return;
+  if (!clips.length || !S.sources.some(M => M.videoFile)) return;
   const status = t => { $('expStatus').textContent = t; };
   const bar = p => { $('expBar').style.width = Math.round(p*100) + '%'; };
   $('expMp4').disabled = true;
   try {
-    if (!S.mp4){ status('Reading sample table\u2026'); bar(0.05); S.mp4 = await parseMp4(S.video); }
-    if (S.mp4.error) throw new Error(S.mp4.error);
+    status('Reading sample tables\u2026'); bar(0.05);
     status(`Assembling ${clips.length} clips\u2026`);
-    const { blob, placed, bytes, cards, cardFrames, cardError } = await exportMp4(clips, p => bar(0.05 + p*0.9),
+    const { blob, placed, bytes, cards, cardFrames, cardError, matches } = await exportMp4(clips, p => bar(0.05 + p*0.9),
       { titles: $('titleCards').checked && clips.some(c => c.section),
         titleSeconds: +$('titleSec').value || 2 });
 
-    const name = (S.file?.name || 'montage').replace(/\.[^.]+$/,'') +
+    const name = (S.sources[0]?.scoutName || 'montage').replace(/\.[^.]+$/,'') +
                  (S.src === 'reel' ? '-reel' : '-filter') + '.mp4';
     const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
@@ -1843,7 +2024,7 @@ $('expMp4').onclick = async () => {
     const dur = placed.reduce((s,p) => s + (p.actualEnd - p.actualStart), 0);
     bar(1);
     status(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
-      `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy, no re-encode \u00b7 ` +
+      `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy from ${matches} match${matches>1?'es':''} \u00b7 ` +
       `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
       (cards ? ` \u00b7 ${cards} title cards (${cardFrames} frames written)` : '') +
       (cardError ? ` \u00b7 title cards skipped: ${cardError}` : '') + vtxt);
@@ -1859,30 +2040,78 @@ function save(name, text, mime){
 }
 
 $('expEdl').onclick = () => save('montage.edl.json', JSON.stringify({
-  source: S.video?.name || null,
-  scout: S.file?.name || null,
-  calibration: { slope: S.cal.slope, offset: S.cal.offset, source: S.cal.from,
-                 fit: S.cal.fit, anchors: S.cal.anchors },
+  matches: S.sources.map((M,i) => ({ n: i+1, scout: M.scoutName, video: M.videoName,
+    unit: M.unit, teams: M.teams,
+    calibration: { slope: M.cal.slope, offset: M.cal.offset, source: M.cal.from,
+                   fit: M.cal.fit, anchors: M.cal.anchors } })),
   filter: Object.fromEntries(Object.entries(S.filt).map(([k,v]) => [k, [...v]])),
   window: { mode: $('window').value, pre: +$('pre').value, post: +$('post').value },
   reel: S.reel,
   clips: exportList().map(c => ({ n: c.n, start: +c.s.toFixed(3), end: +c.e.toFixed(3),
-    duration: +(c.e-c.s).toFixed(3), label: c.label, set: c.m.set, rally: c.rally,
-    team: c.m.team, player: c.m.player, skill: c.m.skill,
+    duration: +(c.e-c.s).toFixed(3), label: c.label, match: c.src, set: c.m.set, rally: c.rally,
+    team: c.m.teamName, player: c.m.player, skill: c.m.skill,
     combination: c.m.combination, effect: c.m.effect }))
 }, null, 2));
 
 $('expCsv').onclick = () => {
-  const rows = [['n','section','start','end','duration','set','team','player','skill','combination','effect','label']];
-  exportList().forEach(c => rows.push([c.n, c.section||'', c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
-    c.m.set, c.m.team, c.m.player, c.m.skill, c.m.combination||'', c.m.effect||'',
+  const rows = [['n','section','match','start','end','duration','set','team','player','skill','combination','effect','label']];
+  exportList().forEach(c => rows.push([c.n, c.section||'', matchLabel(c.src), c.s.toFixed(3), c.e.toFixed(3), (c.e-c.s).toFixed(3),
+    c.m.set, c.m.teamName, c.m.player, c.m.skill, c.m.combination||'', c.m.effect||'',
     '"'+c.label.replace(/"/g,'""')+'"']));
   save('montage.csv', rows.map(r => r.join(',')).join('\n'), 'text/csv');
 };
 
 /* ── render ──────────────────────────────────────────────── */
 
+/* One row per match: which scout file, which video, and a way to fix a bad pairing. */
+function renderMatches(){
+  const host = $('matches'); host.innerHTML = '';
+  if (!S.sources.length) return;
+
+  S.sources.forEach((M, idx) => {
+    const row = el('div','match');
+    row.appendChild(el('div','tag', 'M' + (idx+1)));
+
+    const who = el('div','who');
+    who.appendChild(el('b', null, Object.values(M.teams||{}).join('  v  ') || M.scoutName));
+    who.appendChild(el('span', null,
+      `${M.plays.length.toLocaleString()} touches \u00b7 ${M.rallies.length} rallies` +
+      (M.videoDur ? ` \u00b7 video ${clock(M.videoDur)}` : '') +
+      (M.videoFile ? ` \u00b7 first touch ${clock(M.rawMin * M.unit)}` : '')));
+    row.appendChild(who);
+
+    const sel = el('select');
+    const none = el('option', null, '\u2014 no video \u2014'); none.value = '';
+    sel.appendChild(none);
+    S.videos.forEach((f, i) => {
+      const o = el('option', null, f.name); o.value = i;
+      if (M.videoFile === f) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = async () => {
+      const f = sel.value === '' ? null : S.videos[+sel.value];
+      // A video can only belong to one match.
+      if (f) S.sources.forEach(o => { if (o !== M && o.videoFile === f){ o.videoFile = null; o.videoDur = 0; } });
+      M.videoFile = f; M.videoName = f ? f.name : null; M.videoDur = 0; M.mp4 = null;
+      await measureVideos(); rebuild(); render();
+    };
+    row.appendChild(sel);
+
+    if (!M.videoFile){
+      const w = el('span','warn','needs a video'); w.style.fontSize = '11.5px';
+      row.appendChild(w);
+    }
+    const x = el('button', null, '\u2715');
+    x.title = 'remove this match';
+    x.onclick = () => removeSource(M.id);
+    row.appendChild(x);
+    host.appendChild(row);
+  });
+}
+
 function render(){
+  renderMatches();
+
   const t = $('finfo'), d = $('diag');
   t.innerHTML = ''; d.innerHTML = '';
   const mk = tbl => (k,v,cls) => { const r = tbl.insertRow();
@@ -1890,56 +2119,63 @@ function render(){
     const c = r.insertCell(); c.innerHTML = v; if (cls) c.className = cls; };
   const add = mk(t), tech = mk(d);
 
-  // Plain-language summary: what loaded, and the one number worth eyeballing.
-  if (S.file){
-    add('Match', Object.values(S.teams||{}).join('  vs  '));
-    add('Scout', `${S.plays.length.toLocaleString()} touches, ${S.rallies.length} rallies ` +
-      `<span style="color:#8996a6">\u00b7 ${S.file.name}</span>`);
-    add('First touch', `<b>${clock(S.rawMin * S.unit)}</b> into the recording ` +
-      `<span style="color:#8996a6">\u2014 check the first serve is there</span>`);
+  const paired = S.sources.filter(M => M.videoFile);
+  if (paired.length){
+    const teams = [...new Set(S.plays.map(p => p.teamName))];
+    add('Teams', teams.join('  \u00b7  '));
+    add('Loaded', `${paired.length} match${paired.length>1?'es':''} \u00b7 ` +
+      `${S.plays.length.toLocaleString()} touches \u00b7 ${S.rallies.length} rallies`);
   }
-  if (S.video) add('Video', `${clock(S.videoDur)} ` +
-    `<span style="color:#8996a6">\u00b7 ${S.video.name}, ${bytes(S.video.size)}</span>`);
 
-  const need = [!S.file && 'a scout file', !S.video && 'the match .mp4'].filter(Boolean);
-  $('loadState').textContent = need.length ? 'need ' + need.join(' and ') : 'ready';
-  $('n1').classList.toggle('on', !need.length);
+  const need = [];
+  if (!S.sources.length) need.push('a scout file');
+  if (S.sources.length && !paired.length) need.push('a matching video');
+  const unpaired = S.sources.filter(M => !M.videoFile).length;
+  if (paired.length && unpaired) need.push(`${unpaired} unpaired scout file(s)`);
+  $('loadState').textContent = need.length ? need.join(', ') : 'ready';
+  $('n1').classList.toggle('on', paired.length > 0 && !unpaired);
 
-  // Diagnostics stay folded away unless something is wrong.
-  $('diagWrap').hidden = !S.file;
-  if (S.codeOf){
-    const r = d.insertRow();
-    r.insertCell().textContent = 'sides';
-    const c = r.insertCell();
-    c.innerHTML = `<code>${S.codeOf.home}</code> = ${S.teams[S.codeOf.home]} (home), ` +
-      `<code>${S.codeOf.away}</code> = ${S.teams[S.codeOf.away]} (away)<br>` +
-      `<span style="color:#8996a6">${S.sideSrc}${S.swapped ? ' \u00b7 manually swapped' : ''}</span> `;
-    const b2 = el('button', null, 'Swap sides');
-    b2.style.marginTop = '5px'; b2.onclick = swapSides;
-    c.appendChild(b2);
-  }
-  if (S.rotInfo){
-    const r = S.rotInfo, pct = r.total ? Math.round(100*r.hit/r.total) : 0;
-    tech('rotation', r.method ? `${r.method} \u00b7 ${r.hit}/${r.total} (${pct}%)`
-      : 'unavailable \u2014 rotation filter disabled',
-      !r.method ? 'bad' : pct > 95 ? 'ok' : 'warn');
-  }
+  $('diagWrap').hidden = !S.sources.length;
+  S.sources.forEach((M, i) => {
+    if (M.codeOf){
+      const r = d.insertRow();
+      r.insertCell().textContent = 'M' + (i+1) + ' sides';
+      const c = r.insertCell();
+      c.innerHTML = `${M.teams[M.codeOf.home]} (home) v ${M.teams[M.codeOf.away]} (away)<br>` +
+        `<span style="color:#8996a6">${M.sideSrc||'explicit'}${M.swapped?' \u00b7 swapped':''}</span> `;
+      if (M.format === 'vsm'){
+        const b2 = el('button', null, 'Swap'); b2.style.marginTop = '5px';
+        b2.onclick = () => swapSides(M); c.appendChild(b2);
+      }
+    }
+    if (M.rotInfo){
+      const pct = M.rotInfo.total ? Math.round(100*M.rotInfo.hit/M.rotInfo.total) : 0;
+      tech('M'+(i+1)+' rotation', `${M.rotInfo.method} \u00b7 ${pct}%`,
+        pct > 95 ? 'ok' : 'warn');
+    }
+    tech('M'+(i+1)+' timing', `${M.format} \u00b7 ` +
+      (M.unit === 1 ? 'whole seconds' : 'deciseconds') + ' \u00b7 ' + M.cal.from);
+  });
   if (S.roles){
     const v = Object.values(S.roleSrc||{});
-    const fr = v.filter(x => x === 'roster').length;
-    tech('positions', `${fr}/${v.length} from the roster, ${v.length-fr} derived from play patterns`,
-      fr === v.length ? 'ok' : 'warn');
+    const n = w => v.filter(x => x === w).length;
+    const mixed = n('routes (mixed)');
+    tech('positions', `${n('roster')} from rosters, ${n('routes')+mixed} from attack routes` +
+      (mixed ? ` (${mixed} close call${mixed>1?'s':''})` : '') +
+      `, ${v.length - n('roster') - n('routes') - mixed} inferred from play volume`,
+      mixed ? 'warn' : 'ok');
   }
-  if (S.plays.length) tech('time unit', S.unit === 1 ? 'whole seconds (dvw)' : 'deciseconds (vsm)');
 
-  const ready = S.plays.length && S.videoDur;
+  const ready = S.plays.length > 0;
   $('calSec').hidden = $('filtSec').hidden = $('clipSec').hidden = !ready;
   if (!ready) return;
 
   renderCal();
-  $('calSummary').innerHTML = S.cal.anchors.length
-    ? `Timing \u2014 <span class="warn">corrected with ${S.cal.anchors.length} anchor(s)</span>`
-    : `Timing \u2014 <span class="ok">using the file's own timestamps</span>`;
+  const CM = calM();
+  $('calSummary').innerHTML = CM && CM.cal.anchors.length
+    ? `Timing \u2014 <span class="warn">M${S.sources.indexOf(CM)+1} corrected with ` +
+      `${CM.cal.anchors.length} anchor(s)</span>`
+    : `Timing \u2014 <span class="ok">using each file's own timestamps</span>`;
 
   renderQuick();
   renderFilters();
@@ -1957,7 +2193,7 @@ function render(){
   $('n3').classList.toggle('on', S.reel.length > 0);
 }
 
-recalc(); render();
+render();
 </script>
 </body>
 </html>
