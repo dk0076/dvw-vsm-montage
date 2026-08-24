@@ -311,6 +311,7 @@
       <div class="inner">
         <div class="row">
           <label class="f"><input type="checkbox" id="titleCards" checked> Section title cards</label>
+          <label class="f"><input type="checkbox" id="cardFull" checked> Card court shows full filter set</label>
           <label class="f">Hold <input type="number" id="titleSec" value="2" step="0.5" min="0.5"></label>
           <button id="expEdl">EDL (json)</button>
           <button id="expCsv">Clip list (csv)</button>
@@ -464,7 +465,7 @@ const S = {
   codeMap: JSON.parse(JSON.stringify(DEFAULT_CODE_MAP)),
   plays:[], rallies:[], labels:{}, comboRole:null,
 
-  filt:{}, reel:[], src:'filter',
+  filt:{}, reel:[], secFilt:{}, src:'filter',
   clips:[], cur:-1, montage:false
 };
 
@@ -1572,10 +1573,26 @@ function reelClips(){
   });
 }
 
+/* A section's card should show the whole tendency the section was cut from,
+   not only the handful of clips that made the cut. The clips themselves cannot
+   reconstruct that population, so record the filter that produced them. A
+   section added to more than once keeps every snapshot and unions them. */
+function snapshotFilter(){
+  return { filt: Object.fromEntries(Object.entries(S.filt).map(([k,v]) => [k, [...v]])),
+           area: S.area ? { ...S.area } : null };
+}
+const sameSnapshot = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
 function addToReel(list){
   const section = ($('secName').value || '').trim() || 'Untitled';
   const mode = $('window').value, pre = +$('pre').value || 0,
         post = +$('post').value || 0, min = +$('minlen').value || 0;
+  const snap = snapshotFilter();
+  const has = Object.keys(snap.filt).length || snap.area;
+  if (has){
+    const bag = S.secFilt[section] || (S.secFilt[section] = []);
+    if (!bag.some(s => sameSnapshot(s, snap))) bag.push(snap);
+  }
   for (const c of list){
     if (S.reel.some(r => r.anchor === c.p.i && r.section === section)) continue;
     S.reel.push({ anchor: c.p.i, play: c.m.i, src: c.p.src, mode, pre, post, min,
@@ -1584,8 +1601,47 @@ function addToReel(list){
   render();
 }
 
+/* Every play the section's filters selected, coordinates only. Falls back to an
+   empty set when a section predates the snapshot or was built with no filter —
+   the caller then draws the clips alone, as before. */
+function sectionPopulation(section){
+  const bag = S.secFilt[section];
+  if (!bag || !bag.length) return [];
+  const seen = new Set(), out = [];
+  for (const snap of bag){
+    const keys = Object.keys(snap.filt);
+    const a = snap.area;
+    for (const p of S.plays){
+      if (p.ex == null || seen.has(p)) continue;
+      if (a && !(p.ex >= a.x0 && p.ex <= a.x1 && p.ey >= a.y0 && p.ey <= a.y1)) continue;
+      if (!keys.every(k => snap.filt[k].includes(facetValue(p, k)))) continue;
+      seen.add(p); out.push(p);
+    }
+  }
+  return out;
+}
+
+/* Step across the set rather than truncating it, so a card built from several
+   matches shows all of them in proportion. */
+function sampleFor(plays, cap){
+  if (plays.length <= cap) return plays;
+  return plays.filter((_, i) => i % Math.ceil(plays.length / cap) === 0);
+}
+
+/* What a section's card should draw: the population behind it, and the clips
+   picked out of it. */
+function cardLayers(section, clips){
+  const own = clips.map(x => (x.m && x.m.ex != null) ? x.m : x.p)
+                   .filter(p => p && p.ex != null);
+  if (!$('cardFull') || !$('cardFull').checked) return { bg: [], fg: own, total: own.length };
+  const pop = sectionPopulation(section);
+  if (!pop.length) return { bg: [], fg: own, total: own.length };
+  const ownSet = new Set(own);
+  return { bg: sampleFor(pop.filter(p => !ownSet.has(p)), 600), fg: own, total: pop.length };
+}
+
 $('addAll').onclick = () => addToReel(S.clips);
-$('reelClear').onclick = () => { S.reel = []; render(); };
+$('reelClear').onclick = () => { S.reel = []; S.secFilt = {}; render(); };
 
 function moveSection(name, dir){
   const order = [...new Set(S.reel.map(r => r.section))];
@@ -1616,6 +1672,15 @@ function renderReel(){
     const head = el('header');
     const rows = clips.filter(c => c.section === name);
     head.appendChild(el('b', null, `${name} \u00b7 ${rows.length}`));
+    // How much context the card will carry — a section whose filter selected
+    // 40 plays draws all 40, with these clips picked out.
+    const pop = sectionPopulation(name).length;
+    if (pop > rows.length){
+      const c = el('span', null, `of ${pop} on card`);
+      c.style.cssText = 'font-size:11px;color:#8996a6';
+      c.title = 'the card court draws the whole filtered set behind the chosen clips';
+      head.appendChild(c);
+    }
     // A section drawn from two differently sized recordings cannot land in one
     // file — say so here, where the section is still easy to rearrange.
     const secGeoms = [...new Set(rows.map(geomOfClip))].filter(g => g !== '?');
@@ -1628,7 +1693,8 @@ function renderReel(){
     const mk = (txt, fn) => { const b = el('button', null, txt); b.onclick = fn; return b; };
     head.appendChild(mk('\u2191', () => moveSection(name, -1)));
     head.appendChild(mk('\u2193', () => moveSection(name, +1)));
-    head.appendChild(mk('\u2715', () => { S.reel = S.reel.filter(r => r.section !== name); render(); }));
+    head.appendChild(mk('\u2715', () => { S.reel = S.reel.filter(r => r.section !== name);
+                                          delete S.secFilt[name]; render(); }));
     wrap.appendChild(head);
 
     rows.forEach(c => {
@@ -1681,11 +1747,12 @@ const V = $('v');
 
 /* Preview twin of the court drawn onto the exported card, so what you watch in
    the app is what lands in the file. */
-function drawCardCourt(plays){
+function drawCardCourt(fg, bg){
   const svg = $('cardCourt');
+  bg = bg || [];
   svg.innerHTML = '';
-  svg.hidden = !plays.length;
-  if (!plays.length) return;
+  svg.hidden = !fg.length && !bg.length;
+  if (svg.hidden) return;
   const W = COURT.w, L = COURT.len, N = COURT.net;
   svg.appendChild(svgEl('rect', { x:0, y:0, width:W, height:L, class:'c1' }));
   [N-300, N+300].forEach(y =>
@@ -1693,11 +1760,20 @@ function drawCardCourt(plays){
   [W/3, 2*W/3].forEach(x =>
     svg.appendChild(svgEl('line', { x1:x, y1:0, x2:x, y2:L, class:'c2' })));
   svg.appendChild(svgEl('line', { x1:0, y1:SY(N), x2:W, y2:SY(N), class:'cn' }));
-  for (const p of plays){
+  // Context first, so the clips that were actually cut sit on top of it.
+  for (const p of bg){
     const col = EFFECT_COLOR[p.effect] || '#8996a6';
     svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
-      stroke:col, 'stroke-width':13, opacity:.75 }));
+      stroke:col, 'stroke-width':6, opacity:.34 }));
+    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:11, fill:col, opacity:.45 }));
+  }
+  for (const p of fg){
+    const col = EFFECT_COLOR[p.effect] || '#8996a6';
+    svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
+      stroke:col, 'stroke-width':13, opacity:.9 }));
     svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:col }));
+    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:'none',
+      stroke:'#eef4fb', 'stroke-width':5, opacity:.85 }));
   }
 }
 
@@ -1730,9 +1806,11 @@ async function seekClip(i){
   const entering = c.section && (!prev || prev.section !== c.section);
   if (S.montage && entering && $('titleCards').checked){
     const mine = list.filter(x => x.section === c.section);
+    const L = cardLayers(c.section, mine);
     $('cardTitle').textContent = c.section;
-    $('cardSub').textContent = `${mine.length} clip${mine.length===1?'':'s'}`;
-    drawCardCourt(mine.map(x => (x.m && x.m.ex != null) ? x.m : x.p).filter(p => p && p.ex != null));
+    $('cardSub').textContent = `${mine.length} clip${mine.length===1?'':'s'}` +
+      (L.bg.length ? ` \u00b7 ${L.total} plays` : '');
+    drawCardCourt(L.fg, L.bg);
     $('card').hidden = false;
     V.pause();
     clearTimeout(cardTimer);
@@ -1991,7 +2069,7 @@ function avc1Entry(w, h, avcC){
 
 /* The same court the app draws, rendered onto the card canvas so the section
    opens with the shot pattern it is about. */
-function drawCourtOn(cx, bx, by, bw, bh, plays){
+function drawCourtOn(cx, bx, by, bw, bh, plays, bg){
   const X = x => bx + (x / COURT.w) * bw;
   const Y = y => by + ((COURT.len - y) / COURT.len) * bh;
 
@@ -2011,23 +2089,41 @@ function drawCourtOn(cx, bx, by, bw, bh, plays){
 
   const col = e => ({ '#':'#5fd68a', '=':'#f0736a', '/':'#e8c05a', '+':'#6cc0ff' })[e] || '#8996a6';
   const r = Math.max(3, bw * 0.022);
+
+  // Context layer: the whole population the section was cut from.
+  for (const p of (bg || [])){
+    if (p.ex == null) continue;
+    cx.globalAlpha = 0.34;
+    cx.strokeStyle = col(p.effect);
+    cx.lineWidth = Math.max(1, bw * 0.007);
+    cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
+    cx.globalAlpha = 0.45;
+    cx.fillStyle = col(p.effect);
+    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r*0.55, 0, Math.PI*2); cx.fill();
+  }
+
+  // The clips that actually made the reel, ringed so they read against it.
   for (const p of plays){
     if (p.ex == null) continue;
-    cx.globalAlpha = 0.75;
+    cx.globalAlpha = 0.9;
     cx.strokeStyle = col(p.effect);
     cx.lineWidth = Math.max(2, bw * 0.014);
     cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
     cx.globalAlpha = 1;
     cx.fillStyle = col(p.effect);
     cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2); cx.fill();
+    cx.strokeStyle = '#eef4fb';
+    cx.lineWidth = Math.max(1.5, bw * 0.006);
+    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2); cx.stroke();
   }
   cx.globalAlpha = 1;
 }
 
-function drawCard(cx, w, h, title, sub, plays){
+function drawCard(cx, w, h, title, sub, plays, bg){
   cx.fillStyle = '#0b0f14'; cx.fillRect(0,0,w,h);
   const m = w * 0.09;
-  const withCourt = (plays || []).some(p => p.ex != null);
+  const withCourt = (plays || []).some(p => p.ex != null) ||
+                    (bg || []).some(p => p.ex != null);
   // Give the court the right-hand third and keep the text clear of it.
   const textW = withCourt ? w * 0.56 : w - m*2;
 
@@ -2059,15 +2155,15 @@ function drawCard(cx, w, h, title, sub, plays){
 
   if (withCourt){
     const bh = h * 0.78, bw = bh * (COURT.w / COURT.len);
-    drawCourtOn(cx, w - m - bw, (h - bh)/2, bw, bh, plays);
+    drawCourtOn(cx, w - m - bw, (h - bh)/2, bw, bh, plays || [], bg || []);
   }
 }
 
-async function encodeTitle(title, sub, v, frameDur, seconds, plays){
+async function encodeTitle(title, sub, v, frameDur, seconds, plays, bg){
   if (!window.VideoEncoder) throw new Error('WebCodecs VideoEncoder unavailable in this browser');
   const w = v.width, h = v.height;
   const cv = new OffscreenCanvas(w, h);
-  drawCard(cv.getContext('2d'), w, h, title, sub, plays);
+  drawCard(cv.getContext('2d'), w, h, title, sub, plays, bg);
 
   const fps = v.timescale / frameDur;
   const candidates = [codecStringOf(v.sampleEntry), 'avc1.640028', 'avc1.42e01e'].filter(Boolean);
@@ -2245,11 +2341,13 @@ async function exportMp4(clips, onProgress, opts){
     for (const name of names){
       try {
         const mine = clips.filter(c => c.section === name);
-        // The touch the filter actually selected is the one worth plotting.
-        const pts = mine.map(c => (c.m && c.m.ex != null) ? c.m : c.p)
-                        .filter(p => p && p.ex != null);
-        cards[name] = await encodeTitle(name, `${mine.length} clip${mine.length===1?'':'s'}`,
-                                        v, frameDur, opts.titleSeconds || 2, pts);
+        // The touch the filter actually selected is the one worth plotting,
+        // over the whole population the section was cut from.
+        const L = cardLayers(name, mine);
+        const sub = `${mine.length} clip${mine.length===1?'':'s'}` +
+                    (L.bg.length ? ` \u00b7 ${L.total} plays` : '');
+        cards[name] = await encodeTitle(name, sub,
+                                        v, frameDur, opts.titleSeconds || 2, L.fg, L.bg);
       } catch (e){ cardError = e.message || String(e); break; }
     }
     const first = cards[names[0]];
