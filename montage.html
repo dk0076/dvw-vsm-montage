@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>montage v24 — full-population cards, recap edits, mixed-resolution support</title>
+<title>montage v25 — in-browser transcode for mixed resolutions</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161d26; --panel2:#1b232e; --line:#252e3b; --line2:#33405180;
@@ -160,8 +160,8 @@
 <body>
 
 <header class="top">
-  <h1>Montage v24</h1>
-  <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, mixed-resolution handling. Everything stays on this machine.</p>
+  <h1>Montage v25</h1>
+  <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, and in-browser re-encoding so mixed-resolution footage exports as one file. Everything stays on this machine.</p>
 </header>
 
 <div class="wrap">
@@ -313,6 +313,7 @@
           <label class="f"><input type="checkbox" id="titleCards" checked> Section title cards</label>
           <label class="f"><input type="checkbox" id="cardFull" checked> Card court shows full filter set</label>
           <label class="f"><input type="checkbox" id="endCards" checked> Repeat card after each section</label>
+          <label class="f"><input type="checkbox" id="fitOne"> Re-encode mixed sizes into one file</label>
           <label class="f">Hold <input type="number" id="titleSec" value="2" step="0.5" min="0.5"></label>
           <button id="expEdl">EDL (json)</button>
           <button id="expCsv">Clip list (csv)</button>
@@ -1730,10 +1731,21 @@ function renderExportGeom(){
   const groups = clips.length ? groupByGeometry(clips) : [];
   if (groups.length < 2){ host.hidden = true; host.innerHTML = ''; return; }
   host.hidden = false;
-  host.innerHTML = `<span class="warn">Mixed frame sizes</span> \u2014 ` +
-    groups.map(g => `${g.geom} (${g.clips.length})`).join(', ') +
-    `. Stream copy cannot change resolution mid-file, so this exports as ` +
-    `${groups.length} files in reel order.`;
+
+  // Largest share of clip time wins the target, because that is the footage
+  // that then costs nothing to write.
+  const secsOf = g => g.clips.reduce((t,c) => t + Math.max(0, c.e - c.s), 0);
+  const win = groups.reduce((a,b) => secsOf(b) > secsOf(a) ? b : a);
+  const recode = groups.filter(g => g !== win).reduce((n,g) => n + g.clips.length, 0);
+  const list = groups.map(g => `${g.geom} (${g.clips.length})`).join(', ');
+
+  host.innerHTML = $('fitOne') && $('fitOne').checked
+    ? `<span class="warn">Mixed frame sizes</span> \u2014 ${list}. Target ${win.geom}: ` +
+      `${recode} clip${recode===1?'':'s'} re-encoded to fit, the rest stream copied. ` +
+      `One file. Aspect ratio preserved; unequal ratios get bars rather than a crop.`
+    : `<span class="warn">Mixed frame sizes</span> \u2014 ${list}. Stream copy cannot ` +
+      `change resolution mid-file, so this exports as ${groups.length} files in reel ` +
+      `order. Tick <b>Re-encode mixed sizes into one file</b> to get a single file instead.`;
 }
 
 /* Whichever list playback and export are currently pointed at. */
@@ -2178,6 +2190,106 @@ function drawCard(cx, w, h, title, sub, plays, bg){
   }
 }
 
+/* Decode a clip out of one recording and re-encode it at another geometry.
+   Everything else in this exporter is a byte copy; this is the only path that
+   touches pixels, and it exists so footage shot at two sizes can share one
+   track. Aspect ratio is preserved by fit-then-pad: a 16:9 source into a 16:9
+   target pads by zero, while 16:10 pillarboxes rather than cropping, because a
+   symmetric vertical crop is exactly what removes ball apex and far-endline
+   feet — the two things the clip exists to show.
+
+   Because the frames are decoded anyway, the in-point is frame-accurate here:
+   no keyframe-snap lead-in, unlike the copy path. */
+async function transcodeClip(sv, file, startSec, endSec, target, onFrame){
+  if (!window.VideoDecoder || !window.VideoEncoder)
+    throw new Error('WebCodecs decode/encode unavailable in this browser');
+  const avcC = avcCOf(sv.sampleEntry);
+  if (!avcC) throw new Error('source has no avcC — cannot configure a decoder');
+  const codecIn = codecStringOf(sv.sampleEntry) || 'avc1.640028';
+
+  const [a, b] = clipSamples(sv, startSec, endSec);   // a is a sync sample
+  const W = target.width, H = target.height;
+  const fps = sv.timescale / (sv.dur[a] || sv.timescale/30);
+
+  let codec = null;
+  const bitrate = Math.min(16e6, Math.max(2e6, Math.round(W*H*fps*0.15)));
+  for (const cnd of [codecStringOf(target.sampleEntry), 'avc1.640028', 'avc1.42e01e'].filter(Boolean)){
+    try { const r = await VideoEncoder.isConfigSupported({ codec:cnd, width:W, height:H,
+            avc:{format:'avc'}, bitrate, framerate: fps });
+          if (r.supported){ codec = cnd; break; } } catch {}
+  }
+  if (!codec) throw new Error('no supported H.264 encoder configuration');
+
+  // Source-sample duration, keyed by the microsecond stamp fed to the decoder,
+  // so output frames keep the timing of the frames they came from.
+  const durUs = new Map();
+  const keepFrom = Math.round(startSec * 1e6) - 1;
+
+  const out = [];
+  let description = null, failed = null;
+  const enc = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (!description && meta?.decoderConfig?.description)
+        description = new Uint8Array(meta.decoderConfig.description);
+      const d = new Uint8Array(chunk.byteLength); chunk.copyTo(d);
+      out.push({ data: d, key: chunk.type === 'key',
+                 srcDur: durUs.get(chunk.timestamp) ?? null });
+    },
+    error: e => { failed = e; }
+  });
+  enc.configure({ codec, width:W, height:H, avc:{format:'avc'},
+                  bitrate, framerate: fps, latencyMode:'quality' });
+
+  const cv = new OffscreenCanvas(W, H);
+  const ctx = cv.getContext('2d', { alpha:false });
+  let first = true, kept = 0;
+
+  const dec = new VideoDecoder({
+    output: frame => {
+      // Frames between the preceding keyframe and the in-point are decode
+      // pre-roll — needed to reconstruct the picture, not wanted in the output.
+      if (frame.timestamp < keepFrom){ frame.close(); return; }
+      const s = Math.min(W / frame.displayWidth, H / frame.displayHeight);
+      const dw = Math.round(frame.displayWidth * s), dh = Math.round(frame.displayHeight * s);
+      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(frame, (W-dw) >> 1, (H-dh) >> 1, dw, dh);
+      const ts = frame.timestamp;
+      frame.close();
+      const vf = new VideoFrame(cv, { timestamp: ts });
+      // Every segment must open on an IDR: the concat logic downstream assumes
+      // a segment start is seekable, and the encoder will not do this unasked.
+      enc.encode(vf, { keyFrame: first });
+      vf.close();
+      first = false; kept++;
+      if (onFrame) onFrame(kept);
+    },
+    error: e => { failed = e; }
+  });
+  dec.configure({ codec: codecIn, description: avcC, optimizeForLatency: false });
+
+  for (let i = a; i <= b; i++){
+    const raw = new Uint8Array(await file.slice(sv.off[i], sv.off[i] + sv.size[i]).arrayBuffer());
+    const ts = Math.round(sv.dts[i] / sv.timescale * 1e6);
+    durUs.set(ts, sv.dur[i] / sv.timescale);
+    dec.decode(new EncodedVideoChunk({
+      type: sv.sync[i] ? 'key' : 'delta', timestamp: ts,
+      duration: Math.round(sv.dur[i] / sv.timescale * 1e6), data: raw }));
+    if (failed) break;
+  }
+  await dec.flush(); dec.close();
+  await enc.flush(); enc.close();
+  if (failed) throw failed;
+  if (!out.length) throw new Error('re-encode produced no frames');
+  if (!description) throw new Error('encoder returned no avcC');
+  if (!out[0].key) throw new Error('re-encoded segment does not open on a keyframe');
+
+  const fallback = 1 / fps;
+  return { frames: out.map(f => ({ ...f, seconds: f.srcDur ?? fallback })),
+           description,
+           actualStart: Math.max(startSec, sv.dts[a] / sv.timescale),
+           actualEnd: (sv.dts[b] + sv.dur[b]) / sv.timescale };
+}
+
 async function encodeTitle(title, sub, v, frameDur, seconds, plays, bg){
   if (!window.VideoEncoder) throw new Error('WebCodecs VideoEncoder unavailable in this browser');
   const w = v.width, h = v.height;
@@ -2341,14 +2453,37 @@ async function exportMp4(clips, onProgress, opts){
   }
   const vids = ids.map(id => S.sources.find(x => x.id === id));
   const v0 = vids[0].mp4.video;
-  // Invariant: callers partition by geometry before getting here (see
-  // groupByGeometry). A mixed list would produce an unplayable track.
   const odd = vids.find(x => x.mp4.video.width !== v0.width || x.mp4.video.height !== v0.height);
-  if (odd) throw new Error(
+
+  // The track carries one geometry, in tkhd and in the sample entry. Either the
+  // caller pre-partitioned so every clip already matches (stream copy, byte
+  // exact), or transcoding is on and the minority gets re-encoded to fit.
+  let v = v0;
+  if (odd && !opts.transcode) throw new Error(
     `internal: geometry group contains ${odd.mp4.video.width}\u00d7${odd.mp4.video.height} ` +
     `and ${v0.width}\u00d7${v0.height}`);
-
-  const v = v0;
+  if (odd){
+    // Target the geometry holding the most output time, so the re-encode — and
+    // therefore the generation loss — lands on as little footage as possible.
+    const secs = new Map();
+    for (const c of clips){
+      const s = S.sources.find(x => x.id === c.src);
+      const g = `${s.mp4.video.width}x${s.mp4.video.height}`;
+      secs.set(g, (secs.get(g) || 0) + Math.max(0, c.e - c.s));
+    }
+    let best = null, bestSec = -1;
+    for (const x of vids){
+      const g = `${x.mp4.video.width}x${x.mp4.video.height}`;
+      const t = secs.get(g) || 0;
+      if (t > bestSec){ bestSec = t; best = x; }
+    }
+    if (opts.targetId){
+      const forced = vids.find(x => x.id === opts.targetId);
+      if (forced) best = forced;
+    }
+    v = best.mp4.video;
+  }
+  const sameGeom = x => x.mp4.video.width === v.width && x.mp4.video.height === v.height;
   const frameDur = v.dur[0] || Math.round(v.timescale/30);
 
   // One card per section, encoded up front.
@@ -2396,6 +2531,7 @@ async function exportMp4(clips, onProgress, opts){
   const flushRun = () => { if (run){ parts.push(run.file.slice(run.start, run.end)); run = null; } };
 
   let lastSection = null, ci = 0, cardsWritten = 0, cardFrameCount = 0;
+  let transcoded = 0, transcodedFrames = 0;
 
   // A card is a self-contained run of encoded frames, so the same one can be
   // laid down more than once — the recap after a section costs no extra encode.
@@ -2423,6 +2559,37 @@ async function exportMp4(clips, onProgress, opts){
     const S0 = S.sources.find(x => x.id === c.src);
     const vv = S0.mp4.video, file = S0.mp4.file;
     const scale = v.timescale / vv.timescale;   // normalise onto one movie timescale
+
+    // Wrong geometry for this track: rebuild the clip's pixels at the target
+    // rather than dropping it or splitting the export.
+    if (!sameGeom(S0)){
+      const seg = await transcodeClip(vv, file, c.s, c.e, v);
+      const pfx = paramPrefix(seg.description);
+      if (!pfx) throw new Error('re-encoded segment has no usable SPS/PPS');
+      if (anyPrefix && pfx.lengthSize !== anyPrefix.lengthSize)
+        throw new Error('NAL length size differs between source and re-encoder');
+      flushRun();
+      chunkOffsets.push(outPos);
+      sel.perChunk.push(seg.frames.length);
+      sel.desc.push(1);
+      placed.push({ n: ++ci, actualStart: seg.actualStart, actualEnd: seg.actualEnd,
+                    label: c.label, transcoded: true });
+      seg.frames.forEach((f, k) => {
+        const data = k === 0 ? cat(pfx.bytes, f.data) : f.data;
+        sel.size.push(data.length);
+        sel.dur.push(Math.max(1, Math.round(f.seconds * v.timescale)));
+        sel.sync.push(f.key ? 1 : 0);
+        if (sel.cts) sel.cts.push(0);
+        parts.push(data); outPos += data.length;
+      });
+      transcoded++; transcodedFrames += seg.frames.length;
+      if (onProgress) onProgress(ci/clips.length);
+      const nx = clips[idx+1];
+      if (useCards && opts.endCards && c.section && (!nx || nx.section !== c.section))
+        emitCard(c.section);
+      continue;
+    }
+
     const [a,b] = clipSamples(vv, c.s, c.e);
     flushRun();
     chunkOffsets.push(outPos);
@@ -2475,8 +2642,11 @@ async function exportMp4(clips, onProgress, opts){
   // Blob slices stay lazily backed by the file — no footage enters memory.
   return { blob: new Blob([ftyp, moov, mdatHdr, ...parts], { type:'video/mp4' }),
            placed, bytes: outPos, matches: vids.length,
-           cardFrames: cardFrameCount, cards: cardsWritten, cardError };
+           cardFrames: cardFrameCount, cards: cardsWritten, cardError,
+           geom: `${v.width}\u00d7${v.height}`, transcoded, transcodedFrames };
 }
+
+$('fitOne').onchange = () => renderExportGeom();
 
 $('expMp4').onclick = async () => {
   const all = exportList();
@@ -2499,8 +2669,11 @@ $('expMp4').onclick = async () => {
     render();
 
     // Stream copy cannot change frame size mid-track, so a reel spanning two
-    // recording setups becomes one file per size, in reel order.
-    const groups = groupByGeometry(all);
+    // recording setups becomes one file per size, in reel order — unless
+    // re-encoding is on, in which case the odd sizes are rebuilt to fit and it
+    // all lands in one file.
+    const fit = $('fitOne').checked;
+    const groups = fit ? [{ geom: null, clips: all }] : groupByGeometry(all);
     const base = (S.sources[0]?.scoutName || 'montage').replace(/\.[^.]+$/,'') +
                  (S.src === 'reel' ? '-reel' : '-filter');
     const lines = [];
@@ -2511,10 +2684,11 @@ $('expMp4').onclick = async () => {
              (groups.length > 1 ? ` \u00b7 file ${gi+1} of ${groups.length} (${geom})` : '') +
              '\u2026');
       const span = 0.95 / groups.length;
-      const { blob, placed, bytes, cards, cardFrames, cardError, matches } =
+      const { blob, placed, bytes, cards, cardFrames, cardError, matches,
+              geom: outGeom, transcoded, transcodedFrames } =
         await exportMp4(clips, p => bar(0.03 + gi*span + p*span),
           { titles: $('titleCards').checked && clips.some(c => c.section),
-            endCards: $('endCards').checked,
+            endCards: $('endCards').checked, transcode: fit,
             titleSeconds: +$('titleSec').value || 2 });
 
       const name = groups.length === 1
@@ -2535,8 +2709,11 @@ $('expMp4').onclick = async () => {
       const snap = placed.map((p,i) => clips[i].s - p.actualStart);
       const worst = Math.max(...snap);
       const dur = placed.reduce((s,p) => s + (p.actualEnd - p.actualStart), 0);
-      lines.push(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
-        `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy from ${matches} match${matches>1?'es':''} \u00b7 ` +
+      lines.push(`${name} \u00b7 ${outGeom} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
+        `${(bytes/1e6).toFixed(1)} MB \u00b7 ${matches} match${matches>1?'es':''}` +
+        (transcoded ? ` \u00b7 <span class="warn">${transcoded} clip${transcoded>1?'s':''} ` +
+                      `re-encoded (${transcodedFrames} frames)</span>, rest stream copied`
+                    : ` \u00b7 stream copy`) + ` \u00b7 ` +
         `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
         (cards ? ` \u00b7 ${cards} title cards (${cardFrames} frames written)` : '') +
         (cardError ? ` \u00b7 <span class="warn">title cards skipped: ${cardError}</span>` : '') +
