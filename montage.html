@@ -2401,7 +2401,12 @@ function renderCourt(){
   // Draw whatever is currently filtered; fall back to nothing rather than
   // dumping two thousand lines on screen.
   const plays = matched().filter(p => p.ex != null);
-  const capped = plays.slice(0, 400);
+  // S.plays runs match by match, so taking the first N would show only the
+  // earliest match. Step across the whole set instead so every match is
+  // represented in proportion.
+  const CAP = 1200;
+  const capped = plays.length <= CAP ? plays
+    : plays.filter((_, i) => i % Math.ceil(plays.length / CAP) === 0);
   const mode = $('courtWhat').value;
 
   capped.forEach(p => {
@@ -2429,9 +2434,16 @@ function renderCourt(){
       width:a.x1-a.x0, height:a.y1-a.y0, class:'brush' }));
   }
   $('areaClear').hidden = !S.area;
+  // Say which matches are on screen, so a missing one is obvious rather than silent.
+  const per = {};
+  capped.forEach(p => { per[p.src] = (per[p.src]||0) + 1; });
+  const paired = S.sources.filter(M => M.videoFile);
+  const parts = paired.map((M, i) => `M${i+1} ${per[M.id] || 0}`);
   $('courtCount').textContent = plays.length
-    ? `${plays.length} with coordinates` + (plays.length > 400 ? ' · showing 400' : '')
-    : '';
+    ? (paired.length > 1 ? parts.join(' \u00b7 ') + '  ' : '') +
+      `${capped.length} of ${plays.length} shown` +
+      (capped.length < plays.length ? ' (sampled)' : '')
+    : 'no coordinates in the current selection';
 }
 
 /* Drag a rectangle to filter by where the ball landed. */
