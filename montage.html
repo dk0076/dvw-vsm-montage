@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>montage v26 — auto-named reel groups</title>
+<title>montage v27 — auto-named reel groups, edits held</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161d26; --panel2:#1b232e; --line:#252e3b; --line2:#33405180;
@@ -160,7 +160,7 @@
 <body>
 
 <header class="top">
-  <h1>Montage v26</h1>
+  <h1>Montage v27</h1>
   <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, in-browser re-encoding for mixed-resolution footage, and reel groups named automatically from the active filters. Everything stays on this machine.</p>
 </header>
 
@@ -1426,9 +1426,15 @@ function renderSectionName(){
   if (!box) return;
   const s = suggestSectionName();
   $('secSuggest').hidden = !s;
-  if (S.secTouched) return;
+  const cur = box.value.trim();
+  // The field belongs to whoever wrote in it last. Anything other than the
+  // exact text this function put there is the coach's own name, and is never
+  // overwritten — not by a filter change, not after a group is added to the
+  // reel. Emptying the box is the only way to hand it back.
+  if (cur && cur !== S.lastSuggest) return;
   if (document.activeElement === box) return;
   box.value = s;
+  S.lastSuggest = s;
 }
 
 function toggleFacet(key, v){
@@ -1671,8 +1677,6 @@ function addToReel(list){
     S.reel.push({ anchor: c.p.i, play: c.m.i, src: c.p.src, mode, pre, post, min,
                   section, label: c.label });
   }
-  // The group is named and filed; let the next filter suggest its own name.
-  S.secTouched = false;
   render();
 }
 
@@ -1715,9 +1719,11 @@ function cardLayers(section, clips){
   return { bg: sampleFor(pop.filter(p => !ownSet.has(p)), 600), fg: own, total: pop.length };
 }
 
-$('secName').oninput = () => { S.secTouched = $('secName').value.trim() !== ''; };
-$('secName').onblur  = () => renderSectionName();
-$('secSuggest').onclick = () => { S.secTouched = false; renderSectionName(); };
+$('secName').onblur = () => renderSectionName();
+$('secSuggest').onclick = () => {
+  // Explicit request for a fresh name: drop ownership, then rebuild.
+  $('secName').value = ''; S.lastSuggest = null; renderSectionName();
+};
 
 $('addAll').onclick = () => addToReel(S.clips);
 $('reelClear').onclick = () => { S.reel = []; S.secFilt = {}; render(); };
