@@ -317,6 +317,7 @@
         </div>
       </div>
     </details>
+    <div class="note" id="expGeom" hidden></div>
     <div class="note" id="expStatus">&nbsp;</div>
     <div class="bar"><i id="expBar"></i></div>
   </section>
@@ -545,16 +546,48 @@ function autoPair(){
   }
 }
 
-/* Read duration off each video without decoding it. */
+/* Read duration and frame geometry off each video without decoding it. Knowing
+   the resolution up front is what lets the export panel warn about a mixed-size
+   reel before the reel is built, rather than at the end of an export. */
 function measureVideos(){
   return Promise.all(S.sources.filter(M => M.videoFile && !M.videoDur).map(M =>
     new Promise(res => {
       const el = document.createElement('video');
       el.preload = 'metadata';
-      el.onloadedmetadata = () => { M.videoDur = el.duration; URL.revokeObjectURL(el.src); res(); };
+      el.onloadedmetadata = () => {
+        M.videoDur = el.duration;
+        M.videoW = el.videoWidth || 0; M.videoH = el.videoHeight || 0;
+        URL.revokeObjectURL(el.src); res();
+      };
       el.onerror = () => { M.videoError = 'could not read this video'; res(); };
       el.src = URL.createObjectURL(M.videoFile);
     })));
+}
+
+/* Frame geometry as a display string. Prefers the parsed sample entry once a
+   match has been through parseMp4 (that is the number stream copy actually
+   cares about); falls back to what the media element reported. */
+function geomOfSource(M){
+  if (!M || !M.videoFile) return null;
+  const v = M.mp4 && !M.mp4.error && M.mp4.video;
+  if (v && v.width && v.height) return `${v.width}\u00d7${v.height}`;
+  if (M.videoW && M.videoH) return `${M.videoW}\u00d7${M.videoH}`;
+  return null;
+}
+const geomOfClip = c => {
+  const M = S.sources.find(x => x.id === c.src);
+  return geomOfSource(M) || '?';
+};
+/* Split a clip list into one group per frame geometry, groups ordered by first
+   appearance so the reel's running order survives the split. */
+function groupByGeometry(clips){
+  const order = [], by = new Map();
+  for (const c of clips){
+    const g = geomOfClip(c);
+    if (!by.has(g)){ by.set(g, []); order.push(g); }
+    by.get(g).push(c);
+  }
+  return order.map(g => ({ geom: g, clips: by.get(g) }));
 }
 
 function removeSource(id){
@@ -1583,6 +1616,15 @@ function renderReel(){
     const head = el('header');
     const rows = clips.filter(c => c.section === name);
     head.appendChild(el('b', null, `${name} \u00b7 ${rows.length}`));
+    // A section drawn from two differently sized recordings cannot land in one
+    // file — say so here, where the section is still easy to rearrange.
+    const secGeoms = [...new Set(rows.map(geomOfClip))].filter(g => g !== '?');
+    if (secGeoms.length > 1){
+      const w = el('span','warn', secGeoms.join(' + '));
+      w.style.fontSize = '11px';
+      w.title = 'this section mixes frame sizes and will be split across export files';
+      head.appendChild(w);
+    }
     const mk = (txt, fn) => { const b = el('button', null, txt); b.onclick = fn; return b; };
     head.appendChild(mk('\u2191', () => moveSection(name, -1)));
     head.appendChild(mk('\u2193', () => moveSection(name, +1)));
@@ -1610,6 +1652,21 @@ function renderReel(){
   }
   const tot = clips.reduce((a,c) => a + (c.e - c.s), 0);
   $('reelCount').textContent = `${clips.length} clips \u00b7 ${order.length} sections \u00b7 ${clock(tot)}`;
+}
+
+/* Say, before the button is pressed, how many files the export will produce and
+   why — the split is a property of the footage, not of anything fixable here. */
+function renderExportGeom(){
+  const host = $('expGeom');
+  if (!host) return;
+  const clips = exportList();
+  const groups = clips.length ? groupByGeometry(clips) : [];
+  if (groups.length < 2){ host.hidden = true; host.innerHTML = ''; return; }
+  host.hidden = false;
+  host.innerHTML = `<span class="warn">Mixed frame sizes</span> \u2014 ` +
+    groups.map(g => `${g.geom} (${g.clips.length})`).join(', ') +
+    `. Stream copy cannot change resolution mid-file, so this exports as ` +
+    `${groups.length} files in reel order.`;
 }
 
 /* Whichever list playback and export are currently pointed at. */
@@ -2169,11 +2226,12 @@ async function exportMp4(clips, onProgress, opts){
   }
   const vids = ids.map(id => S.sources.find(x => x.id === id));
   const v0 = vids[0].mp4.video;
+  // Invariant: callers partition by geometry before getting here (see
+  // groupByGeometry). A mixed list would produce an unplayable track.
   const odd = vids.find(x => x.mp4.video.width !== v0.width || x.mp4.video.height !== v0.height);
   if (odd) throw new Error(
-    `${odd.videoName} is ${odd.mp4.video.width}\u00d7${odd.mp4.video.height} but ` +
-    `${vids[0].videoName} is ${v0.width}\u00d7${v0.height}. Stream copy cannot change ` +
-    `resolution mid-file \u2014 export these matches separately.`);
+    `internal: geometry group contains ${odd.mp4.video.width}\u00d7${odd.mp4.video.height} ` +
+    `and ${v0.width}\u00d7${v0.height}`);
 
   const v = v0;
   const frameDur = v.dur[0] || Math.round(v.timescale/30);
@@ -2291,40 +2349,73 @@ async function exportMp4(clips, onProgress, opts){
 }
 
 $('expMp4').onclick = async () => {
-  const clips = exportList();
-  if (!clips.length || !S.sources.some(M => M.videoFile)) return;
-  const status = t => { $('expStatus').textContent = t; };
+  const all = exportList();
+  if (!all.length || !S.sources.some(M => M.videoFile)) return;
+  const status = t => { $('expStatus').innerHTML = t; };
   const bar = p => { $('expBar').style.width = Math.round(p*100) + '%'; };
   $('expMp4').disabled = true;
   try {
-    status('Reading sample tables\u2026'); bar(0.05);
-    status(`Assembling ${clips.length} clips\u2026`);
-    const { blob, placed, bytes, cards, cardFrames, cardError, matches } = await exportMp4(clips, p => bar(0.05 + p*0.9),
-      { titles: $('titleCards').checked && clips.some(c => c.section),
-        titleSeconds: +$('titleSec').value || 2 });
+    status('Reading sample tables\u2026'); bar(0.03);
+    // Parse every match first: geometry comes out of the sample entry, and the
+    // grouping below depends on it.
+    for (const id of [...new Set(all.map(c => c.src))]){
+      const src = S.sources.find(x => x.id === id);
+      if (!src) throw new Error('a clip refers to a match that is no longer loaded');
+      if (!src.mp4) src.mp4 = await parseMp4(src.videoFile);
+      if (src.mp4.error) throw new Error(`${src.videoName}: ${src.mp4.error}`);
+    }
+    // The sample entry is authoritative where the media element's display size
+    // was only indicative — repaint the badges now that it is known.
+    render();
 
-    const name = (S.sources[0]?.scoutName || 'montage').replace(/\.[^.]+$/,'') +
-                 (S.src === 'reel' ? '-reel' : '-filter') + '.mp4';
-    const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    // Stream copy cannot change frame size mid-track, so a reel spanning two
+    // recording setups becomes one file per size, in reel order.
+    const groups = groupByGeometry(all);
+    const base = (S.sources[0]?.scoutName || 'montage').replace(/\.[^.]+$/,'') +
+                 (S.src === 'reel' ? '-reel' : '-filter');
+    const lines = [];
 
-    const vfy = await verifyMp4(blob);
-    const vtxt = vfy.error ? ` \u00b7 VERIFY FAILED: ${vfy.error}`
-      : ` \u00b7 verified: ${vfy.entries} sample entr${vfy.entries===1?'y':'ies'} ` +
-        `[${vfy.formats.join(',')}], ${vfy.chunks} chunks ` +
-        `(${Object.entries(vfy.byDesc).map(([d,n]) => `${n} on entry ${d}`).join(', ')}), ` +
-        `${vfy.samples.toLocaleString()} frames`;
+    for (let gi = 0; gi < groups.length; gi++){
+      const { geom, clips } = groups[gi];
+      status(`Assembling ${clips.length} clips` +
+             (groups.length > 1 ? ` \u00b7 file ${gi+1} of ${groups.length} (${geom})` : '') +
+             '\u2026');
+      const span = 0.95 / groups.length;
+      const { blob, placed, bytes, cards, cardFrames, cardError, matches } =
+        await exportMp4(clips, p => bar(0.03 + gi*span + p*span),
+          { titles: $('titleCards').checked && clips.some(c => c.section),
+            titleSeconds: +$('titleSec').value || 2 });
 
-    // Report how far each in-point slid back to reach an IDR.
-    const snap = placed.map((p,i) => clips[i].s - p.actualStart);
-    const worst = Math.max(...snap);
-    const dur = placed.reduce((s,p) => s + (p.actualEnd - p.actualStart), 0);
+      const name = groups.length === 1
+        ? `${base}.mp4`
+        : `${base}_${String(gi+1).padStart(2,'0')}_` +
+          `${geom.replace('\u00d7','x').replace(/[^0-9a-zA-Z]/g,'')}.mp4`;
+      const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+
+      const vfy = await verifyMp4(blob);
+      const vtxt = vfy.error ? ` \u00b7 <span class="bad">VERIFY FAILED: ${vfy.error}</span>`
+        : ` \u00b7 verified: ${vfy.entries} sample entr${vfy.entries===1?'y':'ies'} ` +
+          `[${vfy.formats.join(',')}], ${vfy.chunks} chunks ` +
+          `(${Object.entries(vfy.byDesc).map(([d,n]) => `${n} on entry ${d}`).join(', ')}), ` +
+          `${vfy.samples.toLocaleString()} frames`;
+
+      // Report how far each in-point slid back to reach an IDR.
+      const snap = placed.map((p,i) => clips[i].s - p.actualStart);
+      const worst = Math.max(...snap);
+      const dur = placed.reduce((s,p) => s + (p.actualEnd - p.actualStart), 0);
+      lines.push(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
+        `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy from ${matches} match${matches>1?'es':''} \u00b7 ` +
+        `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
+        (cards ? ` \u00b7 ${cards} title cards (${cardFrames} frames written)` : '') +
+        (cardError ? ` \u00b7 <span class="warn">title cards skipped: ${cardError}</span>` : '') +
+        vtxt);
+    }
+
     bar(1);
-    status(`${name} \u00b7 ${clips.length} clips \u00b7 ${clock(dur)} \u00b7 ` +
-      `${(bytes/1e6).toFixed(1)} MB \u00b7 stream copy from ${matches} match${matches>1?'es':''} \u00b7 ` +
-      `keyframe snap up to ${worst.toFixed(2)} s of extra lead-in` +
-      (cards ? ` \u00b7 ${cards} title cards (${cardFrames} frames written)` : '') +
-      (cardError ? ` \u00b7 title cards skipped: ${cardError}` : '') + vtxt);
+    status((groups.length > 1
+      ? `<span class="warn">Mixed frame sizes \u2014 written as ${groups.length} files, ` +
+        `reel order preserved.</span><br>` : '') + lines.join('<br>'));
   } catch (err){
     status('Export failed: ' + (err.message || err)); bar(0); console.error(err);
   } finally { $('expMp4').disabled = false; }
@@ -2576,16 +2667,31 @@ function renderMatches(){
   const host = $('matches'); host.innerHTML = '';
   if (!S.sources.length) return;
 
+  // Which geometries are in play, so a match that differs can be called out
+  // here rather than at the end of an export.
+  const geoms = [...new Set(S.sources.filter(M => M.videoFile)
+                                     .map(geomOfSource).filter(Boolean))];
+  const mixed = geoms.length > 1;
+
   S.sources.forEach((M, idx) => {
     const row = el('div','match');
     row.appendChild(el('div','tag', 'M' + (idx+1)));
 
+    const g = geomOfSource(M);
     const who = el('div','who');
     who.appendChild(el('b', null, Object.values(M.teams||{}).join('  v  ') || M.scoutName));
-    who.appendChild(el('span', null,
+    const line = el('span', null,
       `${M.plays.length.toLocaleString()} touches \u00b7 ${M.rallies.length} rallies` +
       (M.videoDur ? ` \u00b7 video ${clock(M.videoDur)}` : '') +
-      (M.videoFile ? ` \u00b7 first touch ${clock(M.rawMin * M.unit)}` : '')));
+      (M.videoFile ? ` \u00b7 first touch ${clock(M.rawMin * M.unit)}` : ''));
+    if (g){
+      line.appendChild(document.createTextNode(' \u00b7 '));
+      const b = el('span', mixed ? 'warn' : null, g);
+      if (mixed) b.title = 'this match does not match the others in frame size \u2014 ' +
+                           'it will export as its own file';
+      line.appendChild(b);
+    }
+    who.appendChild(line);
     row.appendChild(who);
 
     const sel = el('select');
@@ -2700,6 +2806,7 @@ function render(){
   renderClips();
   renderCourt();
   renderReel();
+  renderExportGeom();
   $('n3').classList.toggle('on', S.reel.length > 0);
 }
 
