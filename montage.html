@@ -85,7 +85,13 @@
 
   video{width:100%;background:#000;border-radius:8px;display:block}
   #card{position:absolute;inset:0;background:#0b0f14;border-radius:8px;display:flex;
-        flex-direction:column;justify-content:center;padding:0 9%;gap:10px}
+        align-items:center;padding:0 7%;gap:4%}
+  #card .ctext{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px}
+  #cardCourt{height:78%;flex:none}
+  #cardCourt[hidden]{display:none}
+  #cardCourt .c1{stroke:#33445a;stroke-width:10;fill:none}
+  #cardCourt .c2{stroke:#212c3a;stroke-width:6;fill:none}
+  #cardCourt .cn{stroke:#8b98a8;stroke-width:16}
   #card[hidden]{display:none}
   #card span{font:650 clamp(20px,4vw,38px)/1.15 var(--ui);color:#eef4fb;
              border-left:4px solid var(--key);padding-left:15px}
@@ -322,8 +328,11 @@
     <div style="position:relative">
       <video id="v" controls preload="metadata"></video>
       <div id="card" hidden>
-        <span id="cardTitle"></span>
-        <em id="cardSub"></em>
+        <div class="ctext">
+          <span id="cardTitle"></span>
+          <em id="cardSub"></em>
+        </div>
+        <svg id="cardCourt" viewBox="-40 -40 980 1880"></svg>
       </div>
     </div>
     <div class="row" style="margin-top:11px">
@@ -1613,6 +1622,28 @@ const exportList = () => S.reel.length ? reelClips() : S.clips;
 
 const V = $('v');
 
+/* Preview twin of the court drawn onto the exported card, so what you watch in
+   the app is what lands in the file. */
+function drawCardCourt(plays){
+  const svg = $('cardCourt');
+  svg.innerHTML = '';
+  svg.hidden = !plays.length;
+  if (!plays.length) return;
+  const W = COURT.w, L = COURT.len, N = COURT.net;
+  svg.appendChild(svgEl('rect', { x:0, y:0, width:W, height:L, class:'c1' }));
+  [N-300, N+300].forEach(y =>
+    svg.appendChild(svgEl('line', { x1:0, y1:SY(y), x2:W, y2:SY(y), class:'c2' })));
+  [W/3, 2*W/3].forEach(x =>
+    svg.appendChild(svgEl('line', { x1:x, y1:0, x2:x, y2:L, class:'c2' })));
+  svg.appendChild(svgEl('line', { x1:0, y1:SY(N), x2:W, y2:SY(N), class:'cn' }));
+  for (const p of plays){
+    const col = EFFECT_COLOR[p.effect] || '#8996a6';
+    svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
+      stroke:col, 'stroke-width':13, opacity:.75 }));
+    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:col }));
+  }
+}
+
 let cardTimer = null;
 function hideCard(){ clearTimeout(cardTimer); cardTimer = null; $('card').hidden = true; }
 
@@ -1641,9 +1672,10 @@ async function seekClip(i){
   const prev = list[i-1];
   const entering = c.section && (!prev || prev.section !== c.section);
   if (S.montage && entering && $('titleCards').checked){
-    const n = list.filter(x => x.section === c.section).length;
+    const mine = list.filter(x => x.section === c.section);
     $('cardTitle').textContent = c.section;
-    $('cardSub').textContent = `${n} clip${n===1?'':'s'}`;
+    $('cardSub').textContent = `${mine.length} clip${mine.length===1?'':'s'}`;
+    drawCardCourt(mine.map(x => (x.m && x.m.ex != null) ? x.m : x.p).filter(p => p && p.ex != null));
     $('card').hidden = false;
     V.pause();
     clearTimeout(cardTimer);
@@ -1900,32 +1932,85 @@ function avc1Entry(w, h, avcC){
   return cat(B.u32(body.length + 8), B.s4('avc1'), body);
 }
 
-function drawCard(cx, w, h, title, sub){
+/* The same court the app draws, rendered onto the card canvas so the section
+   opens with the shot pattern it is about. */
+function drawCourtOn(cx, bx, by, bw, bh, plays){
+  const X = x => bx + (x / COURT.w) * bw;
+  const Y = y => by + ((COURT.len - y) / COURT.len) * bh;
+
+  cx.lineWidth = Math.max(1.5, bw * 0.011);
+  cx.strokeStyle = '#33445a';
+  cx.strokeRect(X(0), Y(COURT.len), bw, bh);
+
+  cx.strokeStyle = '#212c3a';
+  cx.beginPath();
+  [COURT.net-300, COURT.net+300].forEach(y => { cx.moveTo(X(0), Y(y)); cx.lineTo(X(COURT.w), Y(y)); });
+  [COURT.w/3, 2*COURT.w/3].forEach(x => { cx.moveTo(X(x), Y(0)); cx.lineTo(X(x), Y(COURT.len)); });
+  cx.stroke();
+
+  cx.strokeStyle = '#8b98a8';
+  cx.lineWidth = Math.max(2, bw * 0.018);
+  cx.beginPath(); cx.moveTo(X(0), Y(COURT.net)); cx.lineTo(X(COURT.w), Y(COURT.net)); cx.stroke();
+
+  const col = e => ({ '#':'#5fd68a', '=':'#f0736a', '/':'#e8c05a', '+':'#6cc0ff' })[e] || '#8996a6';
+  const r = Math.max(3, bw * 0.022);
+  for (const p of plays){
+    if (p.ex == null) continue;
+    cx.globalAlpha = 0.75;
+    cx.strokeStyle = col(p.effect);
+    cx.lineWidth = Math.max(2, bw * 0.014);
+    cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
+    cx.globalAlpha = 1;
+    cx.fillStyle = col(p.effect);
+    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2); cx.fill();
+  }
+  cx.globalAlpha = 1;
+}
+
+function drawCard(cx, w, h, title, sub, plays){
   cx.fillStyle = '#0b0f14'; cx.fillRect(0,0,w,h);
   const m = w * 0.09;
-  cx.fillStyle = '#8fd0ff';
-  cx.fillRect(m, h*0.38, w*0.07, Math.max(3, h*0.008));
+  const withCourt = (plays || []).some(p => p.ex != null);
+  // Give the court the right-hand third and keep the text clear of it.
+  const textW = withCourt ? w * 0.56 : w - m*2;
 
-  let size = Math.round(h * 0.13);
-  const fit = () => { cx.font = `600 ${size}px ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial`;
-    return cx.measureText(title).width; };
-  while (fit() > w - m*2 && size > 12) size -= 2;
+  // Family names containing spaces must be quoted or the whole shorthand is
+  // rejected and the previous font silently stays in effect.
+  const SANS = '"Helvetica Neue", Helvetica, Arial, sans-serif';
+  const MONO = 'Menlo, Consolas, monospace';
+
+  let size = Math.round(h * 0.135);
+  const fits = () => {
+    cx.font = `bold ${size}px ${SANS}`;
+    return cx.measureText(title).width <= textW - m;
+  };
+  while (!fits() && size > 14) size -= 2;
+
+  const baseline = h * 0.5 + size * 0.34;
+  cx.fillStyle = '#8fd0ff';
+  cx.fillRect(m, baseline - size * 1.35, w * 0.06, Math.max(4, h * 0.009));
+
   cx.fillStyle = '#eef4fb';
   cx.textBaseline = 'alphabetic';
-  cx.fillText(title, m, h*0.56);
+  cx.fillText(title, m, baseline);
 
   if (sub){
-    cx.font = `400 ${Math.round(h*0.045)}px ui-monospace,Menlo,Consolas,monospace`;
+    cx.font = `${Math.round(h*0.042)}px ${MONO}`;
     cx.fillStyle = '#7d8896';
-    cx.fillText(sub, m, h*0.66);
+    cx.fillText(sub, m, baseline + size * 0.85);
+  }
+
+  if (withCourt){
+    const bh = h * 0.78, bw = bh * (COURT.w / COURT.len);
+    drawCourtOn(cx, w - m - bw, (h - bh)/2, bw, bh, plays);
   }
 }
 
-async function encodeTitle(title, sub, v, frameDur, seconds){
+async function encodeTitle(title, sub, v, frameDur, seconds, plays){
   if (!window.VideoEncoder) throw new Error('WebCodecs VideoEncoder unavailable in this browser');
   const w = v.width, h = v.height;
   const cv = new OffscreenCanvas(w, h);
-  drawCard(cv.getContext('2d'), w, h, title, sub);
+  drawCard(cv.getContext('2d'), w, h, title, sub, plays);
 
   const fps = v.timescale / frameDur;
   const candidates = [codecStringOf(v.sampleEntry), 'avc1.640028', 'avc1.42e01e'].filter(Boolean);
@@ -2101,9 +2186,12 @@ async function exportMp4(clips, onProgress, opts){
     clips.forEach(c => { if (c.section && !names.includes(c.section)) names.push(c.section); });
     for (const name of names){
       try {
-        const n = clips.filter(c => c.section === name).length;
-        cards[name] = await encodeTitle(name, `${n} clip${n===1?'':'s'}`, v, frameDur,
-                                        opts.titleSeconds || 2);
+        const mine = clips.filter(c => c.section === name);
+        // The touch the filter actually selected is the one worth plotting.
+        const pts = mine.map(c => (c.m && c.m.ex != null) ? c.m : c.p)
+                        .filter(p => p && p.ex != null);
+        cards[name] = await encodeTitle(name, `${mine.length} clip${mine.length===1?'':'s'}`,
+                                        v, frameDur, opts.titleSeconds || 2, pts);
       } catch (e){ cardError = e.message || String(e); break; }
     }
     const first = cards[names[0]];
