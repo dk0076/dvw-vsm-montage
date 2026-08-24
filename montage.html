@@ -312,6 +312,7 @@
         <div class="row">
           <label class="f"><input type="checkbox" id="titleCards" checked> Section title cards</label>
           <label class="f"><input type="checkbox" id="cardFull" checked> Card court shows full filter set</label>
+          <label class="f"><input type="checkbox" id="endCards" checked> Repeat card after each section</label>
           <label class="f">Hold <input type="number" id="titleSec" value="2" step="0.5" min="0.5"></label>
           <button id="expEdl">EDL (json)</button>
           <button id="expCsv">Clip list (csv)</button>
@@ -1778,7 +1779,8 @@ function drawCardCourt(fg, bg){
 }
 
 let cardTimer = null;
-function hideCard(){ clearTimeout(cardTimer); cardTimer = null; $('card').hidden = true; }
+function hideCard(){ clearTimeout(cardTimer); cardTimer = null; S.carding = false;
+                     $('card').hidden = true; }
 
 /* Point the player at whichever match a clip belongs to, then seek. */
 function useVideo(srcId){
@@ -1793,6 +1795,24 @@ function useVideo(srcId){
   });
 }
 
+/* Put a section's card on screen for the hold time, then run `then`. Used at
+   both ends of a section so playback mirrors what the exporter writes. */
+function showCard(section, list, then){
+  if (S.carding) return;
+  S.carding = true;
+  const mine = list.filter(x => x.section === section);
+  const L = cardLayers(section, mine);
+  $('cardTitle').textContent = section;
+  $('cardSub').textContent = `${mine.length} clip${mine.length===1?'':'s'}` +
+    (L.bg.length ? ` \u00b7 ${L.total} plays` : '');
+  drawCardCourt(L.fg, L.bg);
+  $('card').hidden = false;
+  V.pause();
+  clearTimeout(cardTimer);
+  cardTimer = setTimeout(() => { S.carding = false; hideCard(); then(); },
+                         (+$('titleSec').value || 2) * 1000);
+}
+
 async function seekClip(i){
   const list = active(), c = list[i];
   if (!c) return;
@@ -1804,18 +1824,8 @@ async function seekClip(i){
   };
   const prev = list[i-1];
   const entering = c.section && (!prev || prev.section !== c.section);
-  if (S.montage && entering && $('titleCards').checked){
-    const mine = list.filter(x => x.section === c.section);
-    const L = cardLayers(c.section, mine);
-    $('cardTitle').textContent = c.section;
-    $('cardSub').textContent = `${mine.length} clip${mine.length===1?'':'s'}` +
-      (L.bg.length ? ` \u00b7 ${L.total} plays` : '');
-    drawCardCourt(L.fg, L.bg);
-    $('card').hidden = false;
-    V.pause();
-    clearTimeout(cardTimer);
-    cardTimer = setTimeout(() => { hideCard(); go(); }, (+$('titleSec').value || 2) * 1000);
-  } else { hideCard(); go(); }
+  if (S.montage && entering && $('titleCards').checked) showCard(c.section, list, go);
+  else { hideCard(); go(); }
 }
 $('play').onclick = () => { if (!S.clips.length) return;
   S.src = 'filter'; S.montage = true; S.cur = 0; seekClip(0); render(); };
@@ -1830,8 +1840,17 @@ V.addEventListener('timeupdate', () => {
   if (!S.montage) return;
   const list = active(), c = list[S.cur];
   if (c && V.currentTime >= c.e){
-    if (S.cur < list.length-1){ S.cur++; seekClip(S.cur); render(); }
-    else { S.montage = false; V.pause(); }
+    const next = list[S.cur+1];
+    const advance = () => {
+      if (next){ S.cur++; seekClip(S.cur); render(); }
+      else { S.montage = false; V.pause(); }
+    };
+    // Leaving a section: hold its card once more, exactly as the export does.
+    const leaving = c.section && (!next || next.section !== c.section);
+    if (leaving && $('titleCards').checked && $('endCards').checked){
+      V.pause();
+      showCard(c.section, list, advance);
+    } else advance();
   }
 });
 
@@ -2376,21 +2395,29 @@ async function exportMp4(clips, onProgress, opts){
   const placed = [];
   const flushRun = () => { if (run){ parts.push(run.file.slice(run.start, run.end)); run = null; } };
 
-  let lastSection = null, ci = 0;
-  for (const c of clips){
-    if (useCards && c.section && c.section !== lastSection && cards[c.section]){
-      flushRun();
-      const card = cards[c.section];
-      chunkOffsets.push(outPos);
-      sel.perChunk.push(card.frames.length);
-      sel.desc.push(1);
-      card.frames.forEach((f, k) => {
-        const data = k === 0 ? cat(cardPrefix.bytes, f.data) : f.data;
-        sel.size.push(data.length); sel.dur.push(frameDur); sel.sync.push(f.key ? 1 : 0);
-        if (sel.cts) sel.cts.push(0);
-        parts.push(data); outPos += data.length;
-      });
-    }
+  let lastSection = null, ci = 0, cardsWritten = 0, cardFrameCount = 0;
+
+  // A card is a self-contained run of encoded frames, so the same one can be
+  // laid down more than once — the recap after a section costs no extra encode.
+  const emitCard = name => {
+    const card = cards[name];
+    if (!card) return;
+    flushRun();
+    chunkOffsets.push(outPos);
+    sel.perChunk.push(card.frames.length);
+    sel.desc.push(1);
+    card.frames.forEach((f, k) => {
+      const data = k === 0 ? cat(cardPrefix.bytes, f.data) : f.data;
+      sel.size.push(data.length); sel.dur.push(frameDur); sel.sync.push(f.key ? 1 : 0);
+      if (sel.cts) sel.cts.push(0);
+      parts.push(data); outPos += data.length;
+    });
+    cardsWritten++; cardFrameCount += card.frames.length;
+  };
+
+  for (let idx = 0; idx < clips.length; idx++){
+    const c = clips[idx];
+    if (useCards && c.section && c.section !== lastSection) emitCard(c.section);
     lastSection = c.section;
 
     const S0 = S.sources.find(x => x.id === c.src);
@@ -2422,6 +2449,12 @@ async function exportMp4(clips, onProgress, opts){
       if (sel.cts) sel.cts.push(Math.round((vv.cts ? vv.cts[i] : 0) * scale));
     }
     if (onProgress) onProgress(ci/clips.length);
+
+    // Recap: the same card again once the section's clips have played, so the
+    // pattern is on screen immediately after the evidence for it.
+    const next = clips[idx+1];
+    if (useCards && opts.endCards && c.section && (!next || next.section !== c.section))
+      emitCard(c.section);
   }
   flushRun();
 
@@ -2442,8 +2475,7 @@ async function exportMp4(clips, onProgress, opts){
   // Blob slices stay lazily backed by the file — no footage enters memory.
   return { blob: new Blob([ftyp, moov, mdatHdr, ...parts], { type:'video/mp4' }),
            placed, bytes: outPos, matches: vids.length,
-           cardFrames: useCards ? Object.values(cards).reduce((a,c)=>a+c.frames.length,0) : 0,
-           cards: useCards ? Object.keys(cards).length : 0, cardError };
+           cardFrames: cardFrameCount, cards: cardsWritten, cardError };
 }
 
 $('expMp4').onclick = async () => {
@@ -2482,6 +2514,7 @@ $('expMp4').onclick = async () => {
       const { blob, placed, bytes, cards, cardFrames, cardError, matches } =
         await exportMp4(clips, p => bar(0.03 + gi*span + p*span),
           { titles: $('titleCards').checked && clips.some(c => c.section),
+            endCards: $('endCards').checked,
             titleSeconds: +$('titleSec').value || 2 });
 
       const name = groups.length === 1
