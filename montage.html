@@ -125,6 +125,17 @@
   .bar>i{display:block;height:100%;background:var(--key);width:0;transition:.25s}
   kbd{border:1px solid var(--line2);border-radius:4px;padding:1px 5px;color:var(--dim);
       font-size:11px;font-family:var(--mono)}
+  #court{background:#10161e;border:1px solid var(--line);border-radius:8px;
+         touch-action:none;cursor:crosshair;display:block}
+  #court .ln{stroke:#33445a;stroke-width:4;fill:none}
+  #court .zone{stroke:#212c3a;stroke-width:2.5;fill:none}
+  #court .net{stroke:#7d8896;stroke-width:7}
+  #court .lbl{fill:#5d6b7c;font:400 42px var(--mono)}
+  #court .shot{stroke-width:5;fill:none;opacity:.62;cursor:pointer}
+  #court .shot:hover{opacity:1;stroke-width:9}
+  #court .dot{opacity:.75;cursor:pointer}
+  #court .dot:hover{opacity:1}
+  #court .brush{fill:#6cc0ff22;stroke:#6cc0ff;stroke-width:3;stroke-dasharray:12 8}
   .empty{color:var(--dim);font-size:12.5px;text-align:center;padding:22px 12px;line-height:1.6}
   .match{display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);
          border-radius:8px;background:var(--panel2);margin-bottom:7px;font-size:12.5px}
@@ -134,6 +145,10 @@
   .match .who b{display:block;font-weight:600}
   .match .who span{color:var(--dim);font-size:11.5px;font-family:var(--mono)}
   .match select{max-width:210px}
+  .mapgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}
+  .mapgrid label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)}
+  .mapgrid code{font-family:var(--mono);color:var(--key);width:26px}
+  .mapgrid input{width:62px;padding:3px 7px}
 </style>
 </head>
 <body>
@@ -159,6 +174,25 @@
       <summary>Technical details</summary>
       <div class="inner"><table id="diag"></table></div>
     </details>
+    <details id="codeWrap" hidden>
+      <summary id="codeSummary">Code vocabulary</summary>
+      <div class="inner">
+        <div class="note" style="margin-top:0">
+          VolleyMetrics files are rewritten into your season codes. Detection is per
+          file, because <code>K2</code>, <code>KB</code> and <code>VP</code> mean different
+          things in each vocabulary.
+        </div>
+        <table id="codeInfo" style="margin-top:10px"></table>
+        <div class="row" style="margin-top:10px">
+          <button id="codeEdit">Edit mapping</button>
+          <button id="codeSave">Download mapping</button>
+          <label class="f"><input type="file" id="codeLoad" accept=".json" style="display:none">
+            <button id="codeLoadBtn">Load mapping</button></label>
+        </div>
+        <div id="codeTable" hidden style="margin-top:11px"></div>
+      </div>
+    </details>
+
     <details id="calSec" hidden>
       <summary id="calSummary">Timing</summary>
       <div class="inner">
@@ -301,6 +335,21 @@
       </label>
     </div>
     <div class="note" id="nowPlaying">&nbsp;</div>
+  </section>
+
+  <section id="courtSec" hidden>
+    <h2>Court <em id="courtCount"></em></h2>
+    <svg id="court" viewBox="-170 -120 1240 2040" style="width:100%;max-height:62vh"></svg>
+    <div class="row" style="margin-top:9px">
+      <label class="f">Show
+        <select id="courtWhat">
+          <option value="end">landing spots</option>
+          <option value="line">full trajectories</option>
+        </select>
+      </label>
+      <button id="areaClear" hidden>Clear area</button>
+      <span class="note" style="margin:0">drag to select a landing area</span>
+    </div>
     <div class="note"><kbd>space</kbd> play/pause &nbsp; <kbd>&larr;</kbd><kbd>&rarr;</kbd> clip
       &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 0.1s</div>
   </section>
@@ -321,8 +370,88 @@ const DEFAULT_UNIT = 0.1;   // .vsm default; .dvw overrides to 1 (whole seconds)
 
 /* ── state ───────────────────────────────────────────────── */
 
+/* ── coordinates ─────────────────────────────────────────────
+   Both formats carry ball geometry. The .vsm stores a travelPath of {x,y} in the
+   acting team's own frame — x 0..900 left→right, y 0 = own endline, 900 = net,
+   1800 = opponent endline, 100 units per metre. The .dvw stores a 1..10000 index
+   over a 100x100 grid in a fixed court frame, so it is rescaled and, where a
+   team attacks "downward", flipped so every play overlays in one frame.      */
+
+const COURT = { w:900, len:1800, net:900, m:100 };
+
+function dvwPoint(v){
+  v = (v||'').trim();
+  if (!v || v === '-1-1' || !/^\d{4}$/.test(v)) return null;
+  const n = parseInt(v,10);
+  if (n < 1) return null;
+  const row = Math.floor((n-1)/100)+1, col = ((n-1)%100)+1;
+  return { x: (col-0.5) * (COURT.w/100), y: (row-0.5) * (COURT.len/100) };
+}
+
+/* Decide per team whether its plays need flipping, from where its attacks land. */
+function orientDvw(M){
+  for (const code of Object.keys(M.teams)){
+    const ends = M.plays.filter(p => p.team === code && p.skill === 'A' && p.path?.length)
+                        .map(p => p.path[p.path.length-1].y);
+    if (ends.length < 5) continue;
+    ends.sort((a,b) => a-b);
+    const median = ends[ends.length>>1];
+    if (median < COURT.net){                       // attacking toward y=0: mirror it
+      M.plays.filter(p => p.team === code).forEach(p =>
+        (p.path||[]).forEach(q => { q.x = COURT.w - q.x; q.y = COURT.len - q.y; }));
+    }
+  }
+}
+
+const lane = x => x < COURT.w/3 ? 0 : x < 2*COURT.w/3 ? 1 : 2;
+const LANE_NAME = ['Left third','Middle third','Right third'];
+
+/* Attack direction in the language coaches use, relative to where it was hit from. */
+function attackDirection(sx, ex){
+  const a = lane(sx), b = lane(ex);
+  if (a === 1) return b === 1 ? 'Middle' : 'Angle';
+  if (a === b) return 'Line';
+  if (Math.abs(a-b) === 2) return 'Cross';
+  return 'Seam';
+}
+
+/* Everything downstream reads these, so compute once at merge time. */
+function deriveGeometry(p){
+  const path = p.path;
+  if (!path || path.length < 2) return;
+  const a = path[0], b = path[path.length-1];
+  p.sx = a.x; p.sy = a.y; p.ex = b.x; p.ey = b.y;
+  p.out = b.x < 0 || b.x > COURT.w || b.y > COURT.len || b.y < 0;
+  p.landLane = p.out ? null : LANE_NAME[lane(b.x)];
+  const past = (b.y - COURT.net) / COURT.m;        // metres beyond the net
+  p.depthM = past;
+  p.depth = p.out ? 'Out' : past < 0 ? 'Own side'
+          : past < 3 ? 'Short (0-3m)' : past <= 6 ? 'Middle (3-6m)' : 'Deep (6m+)';
+  if (p.skill === 'A' && !p.out) p.direction = attackDirection(a.x, b.x);
+  if (p.skill === 'E') p.offNet = (COURT.net - a.y) / COURT.m;
+}
+
+/* ── code vocabulary ─────────────────────────────────────────
+   VolleyMetrics exports carry its own combination and setter-call codes; the
+   program's season codes are different. Some codes (K2, KB, VP) exist in BOTH
+   with different meanings, so conversion has to be decided per file from which
+   vocabulary it is written in — never code by code.                          */
+
+const DEFAULT_CODE_MAP = {
+  attack: { CF:'LS', PP:'PD', V5:'V4', V6:'V2', VB:'VP', X1:'LT', X2:'L2',
+            X3:'P2', X4:'PR', X5:'PG', X6:'PR', X7:'LG', X9:'V4', XM:'LP' },
+  call:   { K1:'KT', K7:'KG', KM:'KP' }
+};
+// Codes that appear in only one vocabulary, used to tell them apart.
+const VM_ONLY     = new Set(['X1','X5','X6','X7','X9','XM','XO','XQ','XP','XS','XR','XB',
+                             'XL','XG','XC','XD','XT','X0','X8','V5','V6','V8','V0','VB',
+                             'VR','CB','CF','CS','PP','K1','K7','KM']);
+const SEASON_ONLY = new Set(['PG','PR','PD','PH','LT','LG','LP','LS','L2','V4','V2','P2',
+                             'ID','KT','KG','KP']);
+
 const S = {
   sources:[], videos:[], calSrc:0,
+  codeMap: JSON.parse(JSON.stringify(DEFAULT_CODE_MAP)),
   plays:[], rallies:[], labels:{}, comboRole:null,
 
   filt:{}, reel:[], src:'filter',
@@ -432,6 +561,7 @@ function rebuild(){
   S.labels = {}; S.comboRole = null;
   for (const M of S.sources){
     if (!M.videoFile) continue;                     // unpaired: nothing to cut from
+    if (!M.mapped){ applyCodeMap(M); M.mapped = true; }
     Object.assign(S.labels, M.labels);
     if (M.comboRole) S.comboRole = Object.assign(S.comboRole || {}, M.comboRole);
     const pBase = plays.length, rBase = rallies.length;
@@ -445,8 +575,9 @@ function rebuild(){
   mergeRosters();
   if (plays.length){
     computeRoles();
-    plays.forEach(p => { p.phase = phaseOf(p, plays, rallies); });
+    plays.forEach(p => { p.phase = phaseOf(p, plays, rallies); deriveGeometry(p); });
   }
+  S.hasCoords = plays.some(p => p.ex != null);
 }
 
 /* One roster across all matches, keyed by team name + jersey. */
@@ -582,9 +713,11 @@ function normPos(s){
 /* Which position an attack route belongs to. DVW states it outright; the .vsm
    does not, so there we fall back to the L-prefix middle-route convention. */
 function attackRole(p){
-  if (p.skill !== 'A' || !p.combination) return null;
-  if (S.comboRole && S.comboRole[p.combination]) return S.comboRole[p.combination];
-  return /^L/.test(p.combination) ? 'C' : null;
+  if (p.skill !== 'A') return null;
+  const raw = p.vmCombination || p.combination;      // route table is keyed by VM codes
+  if (!raw) return null;
+  if (S.comboRole && S.comboRole[raw]) return S.comboRole[raw];
+  return /^L/.test(p.combination || '') ? 'C' : null;
 }
 
 function computeRoles(){
@@ -729,6 +862,47 @@ function phaseOf(p, plays, rallies){
   return 'Transition';
 }
 
+function detectVocabulary(M){
+  let vm = 0, season = 0;
+  for (const p of M.plays){
+    const c = p.combination;
+    if (!c) continue;
+    if (VM_ONLY.has(c)) vm++;
+    else if (SEASON_ONLY.has(c)) season++;
+  }
+  return { vm, season, isVM: vm > season };
+}
+
+/* Rewrite a source into season codes, keeping the original on the play so the
+   DVW route→position table (which is keyed by VolleyMetrics codes) still works. */
+function applyCodeMap(M){
+  M.vocab = detectVocabulary(M);
+  M.unmapped = [];
+  if (!M.vocab.isVM){ M.converted = 0; return; }
+
+  const seen = new Set();
+  let n = 0;
+  for (const p of M.plays){
+    if (!p.combination) continue;
+    p.vmCombination = p.combination;
+    const table = p.skill === 'E' ? S.codeMap.call : S.codeMap.attack;
+    const to = table[p.combination];
+    if (to){ p.combination = to; n++; }
+    else if (!seen.has(p.vmCombination)){
+      seen.add(p.vmCombination);
+      M.unmapped.push(p.vmCombination);      // passed through unchanged
+    }
+  }
+  // Re-key the name table so labels follow the converted codes.
+  const labels = {};
+  for (const [code, name] of Object.entries(M.labels)){
+    const to = S.codeMap.attack[code] || S.codeMap.call[code] || code;
+    if (!labels[to]) labels[to] = name;
+  }
+  M.labels = labels;
+  M.converted = n;
+}
+
 /* ── DVW ─────────────────────────────────────────────────────
    DataVolley's text format. Structurally richer than the .vsm for our purposes:
    the team code is explicit, setter position is stated per row, and the file
@@ -805,12 +979,14 @@ function parseDvw(text, name){
       set: parseInt(r[8],10) || 1, team: c.team, player: c.player,
       skill: c.skill, hitType: c.hitType, effect: c.effect,
       combination: c.combination, raw: t,
-      rot: parseInt(c.team === '*' ? r[9] : r[10], 10) || null
+      rot: parseInt(c.team === '*' ? r[9] : r[10], 10) || null,
+      path: [dvwPoint(r[4]), dvwPoint(r[5]), dvwPoint(r[6])].filter(Boolean)
     });
   }
   closeRally();
   if (!M.plays.length) throw new Error('no usable touches found in [3SCOUT]');
 
+  orientDvw(M);
   M.rotInfo = { method: 'setter position column',
                 hit: M.plays.filter(p => p.rot).length, total: M.plays.length };
   M.rawMin = Math.min(...M.plays.map(p => p.raw));
@@ -837,7 +1013,8 @@ function parseVsm(text, name){
         i: M.plays.length, rally: rid, seq: k, set: si+1,
         team: p.team, player: String(p.player ?? ''),
         skill: p.skill, hitType: p.hitType, effect: p.effect,
-        combination: p.combination, raw: p.time
+        combination: p.combination, raw: p.time,
+        path: (p.travelPath||[]).map(q => ({ x:q.x, y:q.y }))
       }));
       M.rallies.push({ set: si+1, first, last: M.plays.length-1, ev });
     });
@@ -1051,6 +1228,14 @@ function facets(){
   // (skill, combination) pairs — never combination alone. K-codes sit on E, L/V/P on A.
   tally('call',   p => p.skill === 'E' && p.combination ? p.combination : null);
   tally('attack', p => p.skill === 'A' && p.combination ? p.combination : null);
+  tally('direction', p => p.direction,
+        (a,b) => ['Line','Seam','Cross','Middle','Angle'].indexOf(a) -
+                 ['Line','Seam','Cross','Middle','Angle'].indexOf(b));
+  tally('landLane', p => p.landLane,
+        (a,b) => LANE_NAME.indexOf(a) - LANE_NAME.indexOf(b));
+  tally('depth', p => p.depth,
+        (a,b) => ['Short (0-3m)','Middle (3-6m)','Deep (6m+)','Own side','Out'].indexOf(a) -
+                 ['Short (0-3m)','Middle (3-6m)','Deep (6m+)','Own side','Out'].indexOf(b));
   tally('hitType',p => p.hitType);
   tally('effect', p => p.effect);
   tally('position', p => p.player ? (S.roles[p.team+p.player] || 'Reserve') : null,
@@ -1070,6 +1255,8 @@ function facets(){
 
 const FACET_TITLE = {
   match:'Match', set:'Set', team:'Team', skill:'Skill',
+  direction:'Direction \u2014 relative to where it was hit from',
+  landLane:'Where it landed', depth:'Depth past the net',
   rotation:'Rotation \u2014 own team, named by setter zone',
   phase:'Phase \u2014 what started the possession',
   call:'Setter call (on the set touch)',
@@ -1113,6 +1300,9 @@ function facetValue(p, key){
     case 'phase': return p.phase;
     case 'call': return p.skill === 'E' && p.combination ? p.combination : null;
     case 'attack': return p.skill === 'A' && p.combination ? p.combination : null;
+    case 'direction': return p.direction;
+    case 'landLane': return p.landLane;
+    case 'depth': return p.depth;
     case 'hitType': return p.hitType;
     case 'effect': return p.effect;
     case 'position': return p.player ? (S.roles[p.team+p.player] || 'Reserve') : null;
@@ -1121,7 +1311,8 @@ function facetValue(p, key){
 
 /* Facets are split by how often they get used: the ones that answer most
    questions stay visible, rosters and code-level detail fold away. */
-const PRIMARY   = ['match','team','position','skill','attack','call','rotation','phase'];
+const PRIMARY   = ['match','team','position','skill','attack','call','rotation','phase',
+                   'direction','landLane','depth'];
 const SECONDARY = ['set','hitType','effect'];
 
 function toggleFacet(key, v){
@@ -1186,6 +1377,17 @@ function renderFilters(){
     p.appendChild(x);
     pills.appendChild(p);
   }
+  if (S.area){
+    n++;
+    const a = S.area, pill = el('div','pill');
+    pill.appendChild(document.createTextNode(
+      `court area ${(a.x0/100).toFixed(1)}\u2013${(a.x1/100).toFixed(1)}m across, ` +
+      `${((a.y0-COURT.net)/100).toFixed(1)}\u2013${((a.y1-COURT.net)/100).toFixed(1)}m deep`));
+    const x = el('button', null, '\u00d7');
+    x.onclick = () => { S.area = null; render(); };
+    pill.appendChild(x);
+    pills.appendChild(pill);
+  }
   $('pillBar').hidden = !n;
 
   const host = $('filters'); host.innerHTML = '';
@@ -1209,10 +1411,17 @@ $('facetSearch').addEventListener('input', renderFilters);
 
 $('clearFilt').onclick = () => { S.filt = {}; render(); };
 
+function inArea(p){
+  const a = S.area;
+  if (!a) return true;
+  if (p.ex == null) return false;
+  return p.ex >= a.x0 && p.ex <= a.x1 && p.ey >= a.y0 && p.ey <= a.y1;
+}
+
 function matched(){
   const keys = Object.keys(S.filt);
-  if (!keys.length) return [];
-  return S.plays.filter(p => keys.every(k => S.filt[k].has(facetValue(p, k))));
+  if (!keys.length && !S.area) return [];
+  return S.plays.filter(p => inArea(p) && keys.every(k => S.filt[k].has(facetValue(p, k))));
 }
 
 /* ── clip model ──────────────────────────────────────────── */
@@ -2064,6 +2273,205 @@ $('expCsv').onclick = () => {
 /* ── render ──────────────────────────────────────────────── */
 
 /* One row per match: which scout file, which video, and a way to fix a bad pairing. */
+/* Report, per match, which vocabulary it was written in and what was rewritten. */
+function renderCodePanel(){
+  const paired = S.sources.filter(M => M.videoFile);
+  $('codeWrap').hidden = !paired.length;
+  if (!paired.length) return;
+
+  const t = $('codeInfo'); t.innerHTML = '';
+  let anyVM = false, allUnmapped = new Set();
+  paired.forEach((M, i) => {
+    const r = t.insertRow();
+    r.insertCell().textContent = 'M' + (i+1);
+    const c = r.insertCell();
+    if (M.vocab?.isVM){
+      anyVM = true;
+      (M.unmapped||[]).forEach(x => allUnmapped.add(x));
+      c.innerHTML = `<span class="warn">VolleyMetrics codes</span> \u2014 ` +
+        `${M.converted} touches rewritten to season codes` +
+        (M.unmapped?.length
+          ? `<br><span class="bad">no mapping for ${M.unmapped.join(', ')}</span>` +
+            `<span style="color:#8996a6"> \u2014 passed through unchanged</span>`
+          : '');
+    } else {
+      c.innerHTML = `<span class="ok">already in season codes</span> ` +
+        `<span style="color:#8996a6">\u2014 left alone</span>`;
+    }
+  });
+  $('codeSummary').innerHTML = anyVM
+    ? `Code vocabulary \u2014 <span class="${allUnmapped.size ? 'bad' : 'warn'}">` +
+      `converting VolleyMetrics codes` +
+      (allUnmapped.size ? `, ${allUnmapped.size} unmapped` : '') + `</span>`
+    : `Code vocabulary \u2014 <span class="ok">all files in season codes</span>`;
+  if (allUnmapped.size) $('codeWrap').open = true;
+}
+
+function renderCodeTable(){
+  const host = $('codeTable');
+  host.innerHTML = '';
+  // Every VM code seen anywhere, so unmapped ones can be filled in here.
+  const seen = { attack:new Set(), call:new Set() };
+  Object.keys(S.codeMap.attack).forEach(k => seen.attack.add(k));
+  Object.keys(S.codeMap.call).forEach(k => seen.call.add(k));
+  S.sources.forEach(M => M.plays.forEach(p => {
+    const raw = p.vmCombination;
+    if (raw) seen[p.skill === 'E' ? 'call' : 'attack'].add(raw);
+  }));
+
+  for (const kind of ['attack','call']){
+    const wrap = el('div','grp');
+    wrap.appendChild(el('b', null, kind === 'attack' ? 'Attack combinations' : 'Setter calls'));
+    const g = el('div','mapgrid');
+    [...seen[kind]].sort().forEach(code => {
+      const lab = el('label');
+      lab.appendChild(el('code', null, code));
+      lab.appendChild(document.createTextNode('\u2192'));
+      const inp = el('input');
+      inp.type = 'text';
+      inp.value = S.codeMap[kind][code] || '';
+      inp.placeholder = code;
+      inp.onchange = () => {
+        const v = inp.value.trim().toUpperCase();
+        if (v) S.codeMap[kind][code] = v; else delete S.codeMap[kind][code];
+        S.sources.forEach(M => { M.mapped = false; M.plays.forEach(p => {
+          if (p.vmCombination) p.combination = p.vmCombination; }); });
+        rebuild(); render();
+      };
+      lab.appendChild(inp);
+      g.appendChild(lab);
+    });
+    wrap.appendChild(g);
+    host.appendChild(wrap);
+  }
+}
+
+$('codeEdit').onclick = () => {
+  const t = $('codeTable');
+  t.hidden = !t.hidden;
+  if (!t.hidden) renderCodeTable();
+};
+$('codeSave').onclick = () =>
+  save('season-codes.json', JSON.stringify(S.codeMap, null, 2));
+$('codeLoadBtn').onclick = () => $('codeLoad').click();
+$('codeLoad').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const m = JSON.parse(await f.text());
+    if (!m.attack || !m.call) throw new Error('expected { attack: {...}, call: {...} }');
+    S.codeMap = m;
+    S.sources.forEach(M => { M.mapped = false; M.plays.forEach(p => {
+      if (p.vmCombination) p.combination = p.vmCombination; }); });
+    rebuild(); render();
+  } catch(err){ alert('Could not read mapping: ' + (err.message||err)); }
+};
+
+/* ── court ───────────────────────────────────────────────────
+   Plays are already normalised into the acting team's frame, so every team and
+   rotation overlays without mirroring. Screen Y is inverted so the opponent's
+   court — where attacks land — sits at the top, the way a coach watches it. */
+
+const SY = y => COURT.len - y;                     // court space -> screen space
+const EFFECT_COLOR = { '#':'#5fd68a', '=':'#f0736a', '/':'#e8c05a', '+':'#6cc0ff' };
+
+function svgEl(t, attrs){
+  const e = document.createElementNS('http://www.w3.org/2000/svg', t);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+function renderCourt(){
+  const svg = $('court');
+  $('courtSec').hidden = !S.hasCoords || !S.plays.length;
+  if ($('courtSec').hidden) return;
+  svg.innerHTML = '';
+
+  const W = COURT.w, L = COURT.len, N = COURT.net;
+  svg.appendChild(svgEl('rect', { x:0, y:0, width:W, height:L, class:'ln' }));
+  svg.appendChild(svgEl('line', { x1:0, y1:SY(N), x2:W, y2:SY(N), class:'net' }));
+  [N-300, N+300].forEach(y =>                      // three-metre lines
+    svg.appendChild(svgEl('line', { x1:0, y1:SY(y), x2:W, y2:SY(y), class:'zone' })));
+  [W/3, 2*W/3].forEach(x =>
+    svg.appendChild(svgEl('line', { x1:x, y1:SY(L), x2:x, y2:SY(0), class:'zone' })));
+  const t1 = svgEl('text', { x:-16, y:SY(N+450), class:'lbl', 'text-anchor':'end' });
+  t1.textContent = 'opponent'; svg.appendChild(t1);
+  const t2 = svgEl('text', { x:-16, y:SY(N-450), class:'lbl', 'text-anchor':'end' });
+  t2.textContent = 'attacking'; svg.appendChild(t2);
+
+  // Draw whatever is currently filtered; fall back to nothing rather than
+  // dumping two thousand lines on screen.
+  const plays = matched().filter(p => p.ex != null);
+  const capped = plays.slice(0, 400);
+  const mode = $('courtWhat').value;
+
+  capped.forEach(p => {
+    const col = EFFECT_COLOR[p.effect] || '#8996a6';
+    const jump = () => {
+      const k = S.clips.findIndex(c => c.m === p || c.p === p);
+      if (k >= 0){ S.src = 'filter'; S.cur = k; S.montage = false; seekClip(k); render(); }
+    };
+    if (mode === 'line'){
+      const ln = svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
+                                 stroke:col, class:'shot' });
+      ln.appendChild(svgEl('title')).textContent = describe(p);
+      ln.onclick = jump;
+      svg.appendChild(ln);
+    }
+    const d = svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:13, fill:col, class:'dot' });
+    d.appendChild(svgEl('title')).textContent = describe(p);
+    d.onclick = jump;
+    svg.appendChild(d);
+  });
+
+  if (S.area){
+    const a = S.area;
+    svg.appendChild(svgEl('rect', { x:a.x0, y:SY(a.y1),
+      width:a.x1-a.x0, height:a.y1-a.y0, class:'brush' }));
+  }
+  $('areaClear').hidden = !S.area;
+  $('courtCount').textContent = plays.length
+    ? `${plays.length} with coordinates` + (plays.length > 400 ? ' · showing 400' : '')
+    : '';
+}
+
+/* Drag a rectangle to filter by where the ball landed. */
+(function courtBrush(){
+  const svg = $('court');
+  let start = null, box = null;
+  const at = ev => {
+    const pt = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    const q = pt.matrixTransform(svg.getScreenCTM().inverse());
+    return { x:q.x, y:COURT.len - q.y };
+  };
+  svg.addEventListener('pointerdown', ev => {
+    if (ev.target.tagName === 'circle' || ev.target.tagName === 'line') return;
+    start = at(ev); svg.setPointerCapture(ev.pointerId);
+    box = svgEl('rect', { class:'brush' }); svg.appendChild(box);
+  });
+  svg.addEventListener('pointermove', ev => {
+    if (!start) return;
+    const p = at(ev);
+    box.setAttribute('x', Math.min(start.x, p.x));
+    box.setAttribute('y', COURT.len - Math.max(start.y, p.y));
+    box.setAttribute('width', Math.abs(p.x - start.x));
+    box.setAttribute('height', Math.abs(p.y - start.y));
+  });
+  svg.addEventListener('pointerup', ev => {
+    if (!start) return;
+    const p = at(ev);
+    const a = { x0:Math.min(start.x,p.x), x1:Math.max(start.x,p.x),
+                y0:Math.min(start.y,p.y), y1:Math.max(start.y,p.y) };
+    start = null;
+    // A click rather than a drag clears instead of selecting a sliver.
+    S.area = (a.x1-a.x0 > 40 && a.y1-a.y0 > 40) ? a : null;
+    render();
+  });
+})();
+
+$('courtWhat').onchange = renderCourt;
+$('areaClear').onclick = () => { S.area = null; render(); };
+
 function renderMatches(){
   const host = $('matches'); host.innerHTML = '';
   if (!S.sources.length) return;
@@ -2111,6 +2519,7 @@ function renderMatches(){
 
 function render(){
   renderMatches();
+  renderCodePanel();
 
   const t = $('finfo'), d = $('diag');
   t.innerHTML = ''; d.innerHTML = '';
@@ -2189,6 +2598,7 @@ function render(){
     : '';
   buildClips();
   renderClips();
+  renderCourt();
   renderReel();
   $('n3').classList.toggle('on', S.reel.length > 0);
 }
