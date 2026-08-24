@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>montage v25 — in-browser transcode for mixed resolutions</title>
+<title>montage v26 — auto-named reel groups</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161d26; --panel2:#1b232e; --line:#252e3b; --line2:#33405180;
@@ -160,8 +160,8 @@
 <body>
 
 <header class="top">
-  <h1>Montage v25</h1>
-  <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, and in-browser re-encoding so mixed-resolution footage exports as one file. Everything stays on this machine.</p>
+  <h1>Montage v26</h1>
+  <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, in-browser re-encoding for mixed-resolution footage, and reel groups named automatically from the active filters. Everything stays on this machine.</p>
 </header>
 
 <div class="wrap">
@@ -262,6 +262,7 @@
     <div class="row" style="margin-top:11px">
       <input type="text" id="secName" placeholder="Name this group, e.g. GCU setter serving"
              style="flex:1;min-width:0">
+      <button id="secSuggest" title="Rebuild the name from the current filters" hidden>&#8635;</button>
       <button class="go" id="addAll">Add all &rarr; reel</button>
     </div>
     <div class="note">Click a clip to jump to it &middot; <b>+</b> adds just that one</div>
@@ -1360,6 +1361,76 @@ const PRIMARY   = ['match','team','position','skill','attack','call','rotation',
                    'direction','landLane','depth'];
 const SECONDARY = ['set','hitType','effect'];
 
+/* Turn the active filters into the name a coach would give the group. Ordered
+   the way a scouting note reads — who, what they ran, when, where it went,
+   how it finished — rather than by the order the chips happen to sit in.
+   Purely a suggestion: the field stays editable and stops being overwritten the
+   moment anything is typed into it. */
+const EFFECT_WORD = { '#':'kills', '=':'errors', '/':'blocked', '+':'good',
+                      '-':'poor', '!':'in play' };
+const DEPTH_WORD  = { 'Short (0-3m)':'short', 'Middle (3-6m)':'mid-depth',
+                      'Deep (6m+)':'deep', 'Out':'out', 'Own side':'own side' };
+
+function suggestSectionName(){
+  const F = S.filt;
+  const has = k => F[k] && F[k].size;
+  const vals = k => [...F[k]];
+  // Two values read fine spelled out; beyond that a count is clearer than a list.
+  const some = (arr, noun) => !arr.length ? null
+    : arr.length <= 2 ? arr.join(' & ') : `${arr.length} ${noun}`;
+  const bits = [];
+
+  if (has('team')) bits.push(some(vals('team'), 'teams'));
+
+  const pk = Object.keys(F).filter(k => k.startsWith('player@') && F[k].size);
+  if (pk.length){
+    const names = pk.flatMap(k => vals(k).map(v => {
+      const last = (S.roster[v] || '').trim().split(/\s+/).pop() || '';
+      return `#${v.split('|')[1].replace(/^0+(?=\d)/,'')}${last ? ' ' + last : ''}`;
+    }));
+    bits.push(some(names, 'players'));
+  } else if (has('position')){
+    bits.push(some(vals('position').map(v => POS_ABBR[v] || v), 'positions'));
+  }
+
+  // The combination code is the identifying detail; skill only when there is none.
+  const codes = ['attack','call'].filter(has).flatMap(k => vals(k).map(v => S.labels[v] || v));
+  if (codes.length) bits.push(some(codes, 'calls'));
+  else if (has('skill')) bits.push(some(vals('skill').map(v => SKILL[v] || v), 'skills'));
+
+  if (has('phase'))    bits.push('in ' + some(vals('phase').map(v => v.toLowerCase()), 'phases'));
+  if (has('rotation')) bits.push(some(vals('rotation'), 'rotations'));
+  if (has('direction'))bits.push(some(vals('direction').map(v => v.toLowerCase()), 'directions'));
+  if (has('landLane')) bits.push('to ' + some(vals('landLane').map(v => v.toLowerCase()), 'lanes'));
+  if (has('depth'))    bits.push(some(vals('depth').map(v => DEPTH_WORD[v] || v), 'depths'));
+  if (has('hitType'))  bits.push(some(vals('hitType').map(v => String(v).toLowerCase()), 'hit types'));
+  if (S.area)          bits.push('in marked area');
+  if (has('set'))      bits.push('set ' + vals('set').sort().join('/'));
+  if (has('match') && S.sources.length > 1)
+    bits.push(some(vals('match').map(matchLabel), 'matches'));
+
+  // Outcome last: it is the qualifier, not the subject.
+  if (has('effect')) bits.push(some(vals('effect').map(v => EFFECT_WORD[v] || v), 'outcomes'));
+
+  let out = bits.filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
+  if (!out) return '';
+  // Trim whole words rather than cutting mid-phrase.
+  while (out.length > 64 && out.includes(' ')) out = out.slice(0, out.lastIndexOf(' '));
+  return out.charAt(0).toUpperCase() + out.slice(1);
+}
+
+/* Keep the suggestion in the box until the coach names it themselves. Clearing
+   the field hands control back, so the suggestion resumes. */
+function renderSectionName(){
+  const box = $('secName');
+  if (!box) return;
+  const s = suggestSectionName();
+  $('secSuggest').hidden = !s;
+  if (S.secTouched) return;
+  if (document.activeElement === box) return;
+  box.value = s;
+}
+
 function toggleFacet(key, v){
   S.filt[key] = S.filt[key] || new Set();
   S.filt[key].has(v) ? S.filt[key].delete(v) : S.filt[key].add(v);
@@ -1600,6 +1671,8 @@ function addToReel(list){
     S.reel.push({ anchor: c.p.i, play: c.m.i, src: c.p.src, mode, pre, post, min,
                   section, label: c.label });
   }
+  // The group is named and filed; let the next filter suggest its own name.
+  S.secTouched = false;
   render();
 }
 
@@ -1641,6 +1714,10 @@ function cardLayers(section, clips){
   const ownSet = new Set(own);
   return { bg: sampleFor(pop.filter(p => !ownSet.has(p)), 600), fg: own, total: pop.length };
 }
+
+$('secName').oninput = () => { S.secTouched = $('secName').value.trim() !== ''; };
+$('secName').onblur  = () => renderSectionName();
+$('secSuggest').onclick = () => { S.secTouched = false; renderSectionName(); };
 
 $('addAll').onclick = () => addToReel(S.clips);
 $('reelClear').onclick = () => { S.reel = []; S.secFilt = {}; render(); };
@@ -3114,6 +3191,7 @@ function render(){
   renderClips();
   renderCourt();
   renderReel();
+  renderSectionName();
   renderExportGeom();
   $('n3').classList.toggle('on', S.reel.length > 0);
 }
