@@ -1,0 +1,38 @@
+[
+  {
+    "file": "vm-coords.dvw",
+    "note": "VolleyMetrics Portal export: carries ball coordinates on every touch",
+    "plays": 1500,
+    "rallies": 218,
+    "sets": "1,2,3,4,5",
+    "coords": 1500,
+    "rosters": "18/18"
+  },
+  {
+    "file": "vs-match.dvw",
+    "note": "VolleyStation match export: scored rallies, no coordinates",
+    "plays": 1066,
+    "rallies": 172,
+    "sets": "1,2,3,4",
+    "coords": 0,
+    "rosters": "21/15"
+  },
+  {
+    "file": "vs-practice.dvw",
+    "note": "VolleyStation practice export: touches coded, points rarely scored",
+    "plays": 1086,
+    "rallies": 90,
+    "sets": "1,2,3,4",
+    "coords": 0,
+    "rosters": "21/21"
+  },
+  {
+    "file": "vs-dup-jersey.dvw",
+    "note": "VolleyStation export with a stacked home roster (duplicate jerseys)",
+    "plays": 883,
+    "rallies": 155,
+    "sets": "1,2,3,4",
+    "coords": 0,
+    "rosters": "26/20"
+  }
+]
