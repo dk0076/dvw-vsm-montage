@@ -22,19 +22,46 @@ zone 2. VolleyStation writes the second but not the first; VolleyMetrics writes
 both. Coverage percentages above are over touches in the local file set, and
 depend on how much the coder entered.
 
+Both are used. A measured grid coordinate wins; where there is no measured
+start-and-end pair the play is placed at its end zone's centre instead, which
+is the only way a VolleyStation file gets onto the court at all. Zone-placed
+plays are marked approximate, drawn as an open marker with no trajectory line,
+and never used for a set's off-net distance.
+
+The zone grid was read off 103,793 touches across 135 VolleyMetrics files that
+carry zones and measured coordinates together, so it is calibrated rather than
+assumed:
+
+```
+     net
+     4   3   2     y centre 1050      x centre: 4/7/5 = 750
+     7   8   9     y centre 1350                3/8/6 = 450
+     5   6   1     y centre 1650                2/9/1 = 150
+     endline
+```
+
+Checked back against the measured landing on those same 103,320 touches, a zone
+centre sits a median 0.66 m from where the ball actually landed (0.88 m at the
+75th percentile, 1.18 m at the 90th), agrees with the measurement on which
+third of the court 96.5% of the time, and on the depth band 89.0% of the time.
+So it is sound for "which third" and "how deep" and should not be read as a
+landing point.
+
 Both formats carry absolute video timestamps, so there is no calibration step.
 The anchor controls on the page exist to correct a file that is wrong, not to
 line up a file that is right.
 
 ## Known limits
 
-- **`dvwCode` throws away the zone data.** It reads the play code up to the
-  combination at characters 7–8 and discards the rest, so setter call, start
-  zone, end zone and end subzone never reach a play object. Court-area filtering
-  and the shot chart fall back to nothing on VolleyStation `.dvw` even though the
-  file states where the ball went, and on VolleyMetrics `.dvw` they use only the
-  grid index while 99% zone coverage sits unread. `scoutR/R/parse_dvw.R` reads
-  these fields correctly and is the reference for what the characters mean.
+- **Zone placement reaches about a third of the attacks in a VolleyStation
+  file.** A play coded without a zone cannot be put on the court at all, and
+  coders enter zones on roughly 21–39% of attacks depending on the file, so the
+  court filter and the shot chart speak for that subset and not for the match.
+  The match row says how many touches reached the court and how many of those
+  are zone centres; read it before drawing a conclusion from a sparse chart.
+- **A zone centre cannot say "out".** It is the middle of a 3 m square inside
+  the lines, so a zone-placed play never classifies as out, even where the
+  coder used a deep back-row subzone for a ball going long.
 - **`.dvw` video time is whole seconds**, against deciseconds in `.vsm`, so clip
   in and out points are up to half a second coarser.
 - **Rallies group coarsely on practice `.dvw`.** Rallies close on `*pNN:MM`

@@ -420,6 +420,48 @@ function dvwPoint(v){
   return { x: DVW_X0 + col * DVW_XSTEP, y: DVW_Y0 + row * DVW_YSTEP };
 }
 
+/* ── zones ───────────────────────────────────────────────────
+   Where the nine zones sit, read off 103,793 touches across 135 VolleyMetrics
+   files that carry zones and measured coordinates together:
+
+        net
+        4   3   2     y centre 1050
+        7   8   9     y centre 1350
+        5   6   1     y centre 1650
+        endline
+        x centre: 4/7/5 = 750, 3/8/6 = 450, 2/9/1 = 150
+
+   Three 300-unit bands each way, and each zone quarters into subzones centred
+   75 off the zone centre: A low x far from the net, B low x near it, C high x
+   near it, D high x far from it. Measured medians agree with those centres to
+   within about 30 units everywhere except the deep subzones of the back row
+   (1A, 1D, 5A, 5D, 6A, 6D), where real landings sit past the endline because
+   coders use them for balls going long. A zone centre cannot say "out", so
+   those read as deep instead. */
+const DVW_ZONE_X = { 4:750, 7:750, 5:750, 3:450, 8:450, 6:450, 2:150, 9:150, 1:150 };
+const DVW_ZONE_Y = { 4:1050, 3:1050, 2:1050, 7:1350, 8:1350, 9:1350, 5:1650, 6:1650, 1:1650 };
+const DVW_SUB_DX = { A:-75, B:-75, C:75, D:75 };
+const DVW_SUB_DY = { A:75,  B:-75, C:-75, D:75 };
+
+function dvwZonePoint(zone, sub){
+  if (DVW_ZONE_X[zone] == null) return null;
+  return { x: DVW_ZONE_X[zone] + (DVW_SUB_DX[sub] || 0),
+           y: DVW_ZONE_Y[zone] + (DVW_SUB_DY[sub] || 0) };
+}
+
+/* The acting team's own half is the far half turned 180° about the centre of
+   the net, so a start zone mirrors in both axes. Checked against measured
+   start points over the same touches: the mirrored centre falls in the correct
+   third of the court for all nine zones, which is all attackDirection reads.
+   The point itself can be 0.8 m out, because a hitter contacts the ball at the
+   pin rather than in the middle of their zone, and for a reception the start
+   is recorded behind the endline altogether — so this is used for the third it
+   lands in and never for an off-net distance. */
+function dvwZoneStart(zone){
+  const far = dvwZonePoint(zone, null);
+  return far ? { x: COURT.w - far.x, y: COURT.len - far.y } : null;
+}
+
 /* Decide per team whether its plays need flipping, from where its attacks land. */
 function orientDvw(M){
   for (const code of Object.keys(M.teams)){
@@ -450,17 +492,32 @@ function attackDirection(sx, ex){
 /* Everything downstream reads these, so compute once at merge time. */
 function deriveGeometry(p){
   const path = p.path;
-  if (!path || path.length < 2) return;
-  const a = path[0], b = path[path.length-1];
-  p.sx = a.x; p.sy = a.y; p.ex = b.x; p.ey = b.y;
+  let a = null, b = null;
+
+  if (path && path.length >= 2){
+    a = path[0]; b = path[path.length-1];
+  } else {
+    /* No measured pair. A .dvw still states where the ball went by zone, which
+       on a VolleyStation file is the only thing it states, so place the play
+       there rather than dropping it off the court entirely. Flagged approximate
+       because a zone centre is a 3 m by 3 m square, not a measurement. */
+    b = dvwZonePoint(p.endZone, p.endSubZone);
+    if (!b) return;
+    a = (path && path.length ? path[0] : null) || dvwZoneStart(p.startZone);
+    p.approx = true;
+  }
+
+  p.ex = b.x; p.ey = b.y;
+  if (a){ p.sx = a.x; p.sy = a.y; }
   p.out = b.x < 0 || b.x > COURT.w || b.y > COURT.len || b.y < 0;
   p.landLane = p.out ? null : LANE_NAME[lane(b.x)];
   const past = (b.y - COURT.net) / COURT.m;        // metres beyond the net
   p.depthM = past;
   p.depth = p.out ? 'Out' : past < 0 ? 'Own side'
           : past < 3 ? 'Short (0-3m)' : past <= 6 ? 'Middle (3-6m)' : 'Deep (6m+)';
-  if (p.skill === 'A' && !p.out) p.direction = attackDirection(a.x, b.x);
-  if (p.skill === 'E') p.offNet = (COURT.net - a.y) / COURT.m;
+  if (p.skill === 'A' && !p.out && a) p.direction = attackDirection(a.x, b.x);
+  // Off-net distance is a measurement; a mirrored zone centre cannot stand in.
+  if (p.skill === 'E' && !p.approx) p.offNet = (COURT.net - a.y) / COURT.m;
 }
 
 /* ── code vocabulary ─────────────────────────────────────────
@@ -1008,6 +1065,12 @@ function dvwSection(lines, name){
   return out;
 }
 
+/* Empty, ~ and a space are the format's three null markers, as in scoutR. */
+const dvwChr = (s, i) => {
+  const ch = s[i];
+  return (ch == null || ch === '' || ch === '~' || ch === ' ') ? null : ch;
+};
+
 function dvwCode(c){
   if (!c || c.length < 6) return null;
   const player = c.slice(1,3);
@@ -1016,7 +1079,16 @@ function dvwCode(c){
   if (!DVW_SKILLS.includes(skill)) return null;
   let combination = c.slice(6,8);
   if (!combination || combination.includes('~')) combination = '';
-  return { team: c[0], player, skill, hitType: c[4], effect: c[5], combination };
+  /* Zone, end zone and end subzone sit after the combination, at characters
+     10, 11 and 12 of the code — scoutR/R/parse_dvw.R diagrams the layout. On a
+     VolleyStation file these are the only statement of where the ball went,
+     because that writer emits no grid coordinates at all. */
+  const zone = i => { const ch = dvwChr(c, i);
+                      return ch >= '1' && ch <= '9' ? +ch : null; };
+  const sub  = dvwChr(c, 11);
+  return { team: c[0], player, skill, hitType: c[4], effect: c[5], combination,
+           startZone: zone(9), endZone: zone(10),
+           endSubZone: sub >= 'A' && sub <= 'D' ? sub : null };
 }
 
 function parseDvw(text, name){
@@ -1065,6 +1137,7 @@ function parseDvw(text, name){
       set: parseInt(r[8],10) || 1, team: c.team, player: c.player,
       skill: c.skill, hitType: c.hitType, effect: c.effect,
       combination: c.combination, raw: t,
+      startZone: c.startZone, endZone: c.endZone, endSubZone: c.endSubZone,
       rot: parseInt(c.team === '*' ? r[9] : r[10], 10) || null,
       path: [dvwPoint(r[4]), dvwPoint(r[5]), dvwPoint(r[6])].filter(Boolean)
     });
@@ -1897,19 +1970,30 @@ function drawCardCourt(fg, bg){
     svg.appendChild(svgEl('line', { x1:x, y1:0, x2:x, y2:L, class:'c2' })));
   svg.appendChild(svgEl('line', { x1:0, y1:SY(N), x2:W, y2:SY(N), class:'cn' }));
   // Context first, so the clips that were actually cut sit on top of it.
+  // A zone-placed play gets an open marker and no line, same as the exported
+  // card: no flight path was recorded and the point is a 3 m square's centre.
   for (const p of bg){
     const col = EFFECT_COLOR[p.effect] || '#8996a6';
-    svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
-      stroke:col, 'stroke-width':6, opacity:.34 }));
-    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:11, fill:col, opacity:.45 }));
+    if (!p.approx)
+      svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
+        stroke:col, 'stroke-width':6, opacity:.34 }));
+    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:11, opacity:.45,
+      fill: p.approx ? 'none' : col,
+      ...(p.approx ? { stroke:col, 'stroke-width':5 } : {}) }));
   }
   for (const p of fg){
     const col = EFFECT_COLOR[p.effect] || '#8996a6';
-    svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
-      stroke:col, 'stroke-width':13, opacity:.9 }));
-    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:col }));
-    svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:'none',
-      stroke:'#eef4fb', 'stroke-width':5, opacity:.85 }));
+    if (!p.approx)
+      svg.appendChild(svgEl('line', { x1:p.sx, y1:SY(p.sy), x2:p.ex, y2:SY(p.ey),
+        stroke:col, 'stroke-width':13, opacity:.9 }));
+    if (p.approx){
+      svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:'none',
+        stroke:col, 'stroke-width':9 }));
+    } else {
+      svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:col }));
+      svg.appendChild(svgEl('circle', { cx:p.ex, cy:SY(p.ey), r:22, fill:'none',
+        stroke:'#eef4fb', 'stroke-width':5, opacity:.85 }));
+    }
   }
 }
 
@@ -2244,31 +2328,46 @@ function drawCourtOn(cx, bx, by, bw, bh, plays, bg){
   const col = e => ({ '#':'#5fd68a', '=':'#f0736a', '/':'#e8c05a', '+':'#6cc0ff' })[e] || '#8996a6';
   const r = Math.max(3, bw * 0.022);
 
+  /* A play placed from its zone gets no trajectory line and an open marker.
+     Drawing a line between two zone centres would assert a flight path the
+     file never recorded, and a filled dot would read as a measured landing
+     point when it is the middle of a 3 m square. */
+
   // Context layer: the whole population the section was cut from.
   for (const p of (bg || [])){
     if (p.ex == null) continue;
-    cx.globalAlpha = 0.34;
     cx.strokeStyle = col(p.effect);
-    cx.lineWidth = Math.max(1, bw * 0.007);
-    cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
+    if (!p.approx){
+      cx.globalAlpha = 0.34;
+      cx.lineWidth = Math.max(1, bw * 0.007);
+      cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
+    }
     cx.globalAlpha = 0.45;
-    cx.fillStyle = col(p.effect);
-    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r*0.55, 0, Math.PI*2); cx.fill();
+    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r*0.55, 0, Math.PI*2);
+    if (p.approx){ cx.lineWidth = Math.max(1, bw * 0.007); cx.stroke(); }
+    else { cx.fillStyle = col(p.effect); cx.fill(); }
   }
 
   // The clips that actually made the reel, ringed so they read against it.
   for (const p of plays){
     if (p.ex == null) continue;
-    cx.globalAlpha = 0.9;
     cx.strokeStyle = col(p.effect);
-    cx.lineWidth = Math.max(2, bw * 0.014);
-    cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
+    if (!p.approx){
+      cx.globalAlpha = 0.9;
+      cx.lineWidth = Math.max(2, bw * 0.014);
+      cx.beginPath(); cx.moveTo(X(p.sx), Y(p.sy)); cx.lineTo(X(p.ex), Y(p.ey)); cx.stroke();
+    }
     cx.globalAlpha = 1;
-    cx.fillStyle = col(p.effect);
-    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2); cx.fill();
-    cx.strokeStyle = '#eef4fb';
-    cx.lineWidth = Math.max(1.5, bw * 0.006);
-    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2); cx.stroke();
+    cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2);
+    if (p.approx){
+      cx.lineWidth = Math.max(2, bw * 0.014);
+      cx.stroke();
+    } else {
+      cx.fillStyle = col(p.effect); cx.fill();
+      cx.strokeStyle = '#eef4fb';
+      cx.lineWidth = Math.max(1.5, bw * 0.006);
+      cx.beginPath(); cx.arc(X(p.ex), Y(p.ey), r, 0, Math.PI*2); cx.stroke();
+    }
   }
   cx.globalAlpha = 1;
 }
@@ -3191,10 +3290,19 @@ function renderMatches(){
     const g = geomOfSource(M);
     const who = el('div','who');
     who.appendChild(el('b', null, Object.values(M.teams||{}).join('  v  ') || M.scoutName));
+    /* How much of this match can actually be put on the court, and how much of
+       that is a zone centre rather than a measurement. Without this the court
+       filter looks like it covers the match when on a VolleyStation file it
+       reaches about a third of the attacks. */
+    const placed = S.plays.filter(p => p.src === M.id && p.ex != null).length;
+    const zoned  = S.plays.filter(p => p.src === M.id && p.approx).length;
+
     const line = el('span', null,
       `${M.plays.length.toLocaleString()} touches \u00b7 ${M.rallies.length} rallies` +
       (M.videoDur ? ` \u00b7 video ${clock(M.videoDur)}` : '') +
-      (M.videoFile ? ` \u00b7 first touch ${clock(M.rawMin * M.unit)}` : ''));
+      (M.videoFile ? ` \u00b7 first touch ${clock(M.rawMin * M.unit)}` : '') +
+      (placed ? ` \u00b7 ${placed.toLocaleString()} on court` +
+                (zoned ? ` (${zoned.toLocaleString()} by zone only)` : '') : ''));
     if (g){
       line.appendChild(document.createTextNode(' \u00b7 '));
       const b = el('span', mixed ? 'warn' : null, g);
