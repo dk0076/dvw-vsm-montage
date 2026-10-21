@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>montage v27 — auto-named reel groups, edits held</title>
+<title>montage v28 — built-in season code dictionary</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161d26; --panel2:#1b232e; --line:#252e3b; --line2:#33405180;
@@ -160,8 +160,8 @@
 <body>
 
 <header class="top">
-  <h1>Montage v27</h1>
-  <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, in-browser re-encoding for mixed-resolution footage, and reel groups named automatically from the active filters. Everything stays on this machine.</p>
+  <h1>Montage v28</h1>
+  <p>Build clip reels from a scout file and match video. Full-population attack pattern cards, recap edits, in-browser re-encoding for mixed-resolution footage, reel groups named automatically from the active filters, and a built-in season code dictionary. Everything stays on this machine.</p>
 </header>
 
 <div class="wrap">
@@ -451,9 +451,31 @@ function deriveGeometry(p){
    with different meanings, so conversion has to be decided per file from which
    vocabulary it is written in — never code by code.                          */
 
+/* Plain-English names for the program's season codes. Files carry their own
+   [3ATTACKCOMBINATION] tables, but opponent files scouted by someone else often
+   do not, which is why a code sometimes shows raw. This is the fallback, used
+   only where the file itself is silent — the file always wins. */
+const SEASON_LABEL = {
+  // outside
+  PG:'Go', V4:'OOS 4', P4:'2 Ball OH',
+  // opposite / right side
+  PR:'Red', V2:'OOS 5', P2:'2 Ball Opp', PS:'',
+  // middle
+  LT:'One', LG:'Gap', LS:'Slide', LP:'Push', L2:'Back 1', LD:'',
+  // back row
+  IP:'Pipe', VP:'OOS Pipe', ID:'40', PH:'D Ball',
+  // other
+  PO:'Overpass', PD:'Setter Dump',
+  // setter calls
+  KT:'Front Quick', KG:'Quick in 3 (gap)', KS:'Slide', KP:'Push',
+  K2:'A', KB:'MB Red'
+};
+const codeLabel = code => S.labels[code] || SEASON_LABEL[code] || null;
+
 const DEFAULT_CODE_MAP = {
-  attack: { CF:'LS', PP:'PD', V5:'V4', V6:'V2', VB:'VP', X1:'LT', X2:'L2',
-            X3:'P2', X4:'PR', X5:'PG', X6:'PR', X7:'LG', X9:'V4', XM:'LP' },
+  attack: { CB:'LS', CF:'LS', PP:'PD', V5:'V4', V6:'V2', VB:'VP', VR:'V4',
+            X1:'LT', X2:'L2', X3:'P2', X4:'PR', X5:'PG', X6:'PR', X7:'LG',
+            X8:'PH', X9:'V4', XB:'ID', XM:'LP', XP:'IP' },
   call:   { K1:'KT', K7:'KG', KM:'KP' }
 };
 // Codes that appear in only one vocabulary, used to tell them apart.
@@ -461,7 +483,7 @@ const VM_ONLY     = new Set(['X1','X5','X6','X7','X9','XM','XO','XQ','XP','XS','
                              'XL','XG','XC','XD','XT','X0','X8','V5','V6','V8','V0','VB',
                              'VR','CB','CF','CS','PP','K1','K7','KM']);
 const SEASON_ONLY = new Set(['PG','PR','PD','PH','LT','LG','LP','LS','L2','V4','V2','P2',
-                             'ID','KT','KG','KP']);
+                             'ID','KT','KG','KP','P4','IP','PO','PS','LD','K2','KS']);
 
 const S = {
   sources:[], videos:[], calSrc:0,
@@ -1330,7 +1352,7 @@ function facetLabel(key, v){
 
   if (key === 'effect') return `${v} ${EFFECT[v]||''}`.trim();
   if (key === 'call' || key === 'attack')
-    return S.labels[v] ? `${v} ${S.labels[v]}` : v;
+    return codeLabel(v) ? `${v} ${codeLabel(v)}` : v;
   return String(v);
 }
 
@@ -1394,7 +1416,7 @@ function suggestSectionName(){
   }
 
   // The combination code is the identifying detail; skill only when there is none.
-  const codes = ['attack','call'].filter(has).flatMap(k => vals(k).map(v => S.labels[v] || v));
+  const codes = ['attack','call'].filter(has).flatMap(k => vals(k).map(v => codeLabel(v) || v));
   if (codes.length) bits.push(some(codes, 'calls'));
   else if (has('skill')) bits.push(some(vals('skill').map(v => SKILL[v] || v), 'skills'));
 
@@ -1474,7 +1496,7 @@ function renderQuick(){
   const top = Object.entries(m).sort((a,b) => b[1]-a[1]).slice(0,6);
   $('quickRow').hidden = !top.length;
   top.forEach(([code, n]) => {
-    const b = el('button','quick', `${S.labels[code] || code} · ${n}`);
+    const b = el('button','quick', `${codeLabel(code) || code} · ${n}`);
     b.title = `Attack combination ${code}`;
     b.onclick = () => { S.filt = { attack: new Set([code]) }; render(); };
     host.appendChild(b);
@@ -2914,6 +2936,33 @@ function renderCodeTable(){
     wrap.appendChild(g);
     host.appendChild(wrap);
   }
+
+  // Season-code names. These only fill in where a scout file gives no label of
+  // its own, so correcting one here never overrides a file that knows better.
+  const nw = el('div','grp');
+  nw.appendChild(el('b', null, 'Season code names \u2014 used when a file has no label'));
+  const ng = el('div','mapgrid');
+  const codes = new Set(Object.keys(SEASON_LABEL));
+  S.sources.forEach(M => M.plays.forEach(p => { if (p.combination) codes.add(p.combination); }));
+  [...codes].sort().forEach(code => {
+    const lab = el('label');
+    lab.appendChild(el('code', null, code));
+    lab.appendChild(document.createTextNode('\u2192'));
+    const inp = el('input');
+    inp.type = 'text';
+    inp.value = SEASON_LABEL[code] || '';
+    inp.placeholder = S.labels[code] ? `${S.labels[code]} (from file)` : 'no name';
+    if (S.labels[code]) inp.title = 'this file defines its own label, which wins';
+    inp.onchange = () => {
+      const v = inp.value.trim();
+      if (v) SEASON_LABEL[code] = v; else delete SEASON_LABEL[code];
+      render();
+    };
+    lab.appendChild(inp);
+    ng.appendChild(lab);
+  });
+  nw.appendChild(ng);
+  host.appendChild(nw);
 }
 
 $('codeEdit').onclick = () => {
@@ -2922,14 +2971,20 @@ $('codeEdit').onclick = () => {
   if (!t.hidden) renderCodeTable();
 };
 $('codeSave').onclick = () =>
-  save('season-codes.json', JSON.stringify(S.codeMap, null, 2));
+  save('season-codes.json', JSON.stringify(
+    { attack: S.codeMap.attack, call: S.codeMap.call, names: SEASON_LABEL }, null, 2));
 $('codeLoadBtn').onclick = () => $('codeLoad').click();
 $('codeLoad').onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const m = JSON.parse(await f.text());
     if (!m.attack || !m.call) throw new Error('expected { attack: {...}, call: {...} }');
-    S.codeMap = m;
+    S.codeMap = { attack: m.attack, call: m.call };
+    // Names are optional, so an older file without them still loads.
+    if (m.names && typeof m.names === 'object'){
+      Object.keys(SEASON_LABEL).forEach(k => delete SEASON_LABEL[k]);
+      Object.assign(SEASON_LABEL, m.names);
+    }
     S.sources.forEach(M => { M.mapped = false; M.plays.forEach(p => {
       if (p.vmCombination) p.combination = p.vmCombination; }); });
     rebuild(); render();
