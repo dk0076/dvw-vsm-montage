@@ -387,19 +387,37 @@ const DEFAULT_UNIT = 0.1;   // .vsm default; .dvw overrides to 1 (whole seconds)
 /* ── coordinates ─────────────────────────────────────────────
    Both formats carry ball geometry. The .vsm stores a travelPath of {x,y} in the
    acting team's own frame — x 0..900 left→right, y 0 = own endline, 900 = net,
-   1800 = opponent endline, 100 units per metre. The .dvw stores a 1..10000 index
-   over a 100x100 grid in a fixed court frame, so it is rescaled and, where a
-   team attacks "downward", flipped so every play overlays in one frame.      */
+   1800 = opponent endline, 100 units per metre. The .dvw stores a 1..10000
+   index into a 100x100 grid, already oriented to the acting team the same way,
+   so it only needs rescaling onto that frame.                                */
 
 const COURT = { w:900, len:1800, net:900, m:100 };
 
+/* The grid is not the court. Its own frame runs 0.14375..3.85625 across and
+   -0.2037..7.1296 along, with the court — 0.5..3.5 by 0.5..6.5 — sitting inside
+   it, and that margin is what lets the format record a ball landing out. These
+   constants rescale the grid onto the frame above, net at 900; they are the
+   ones scoutR/R/parse_dvw.R uses after checking them against
+   datavolley::dv_index2xy() over all 10000 indices.
+
+   Treating the grid as coextensive with the court, which is what this did
+   before, squeezes every reading toward the middle: about 0.1 m of error at
+   centre court, 0.75 m at the back of the attack lane, 2.3 m in the corners.
+   It also made a ball landing out impossible to represent, because every index
+   then decoded to a point inside the lines.                                  */
+const DVW_X0 = -106.875,     DVW_XSTEP = 11.25;
+const DVW_Y0 = -211.1111111, DVW_YSTEP = 22.2222222;
+
 function dvwPoint(v){
   v = (v||'').trim();
-  if (!v || v === '-1-1' || !/^\d{4}$/.test(v)) return null;
+  /* Empty and -1-1 both mean "no point". A few serve rows carry a plain
+     negative instead, which is not a grid index under any reading of the
+     format; scoutR drops those too, so leave them dropped rather than guess. */
+  if (!v || !/^\d{1,5}$/.test(v)) return null;
   const n = parseInt(v,10);
-  if (n < 1) return null;
-  const row = Math.floor((n-1)/100)+1, col = ((n-1)%100)+1;
-  return { x: (col-0.5) * (COURT.w/100), y: (row-0.5) * (COURT.len/100) };
+  if (!(n >= 1 && n <= 10000)) return null;
+  const col = (n-1) % 100, row = Math.floor((n-1) / 100);
+  return { x: DVW_X0 + col * DVW_XSTEP, y: DVW_Y0 + row * DVW_YSTEP };
 }
 
 /* Decide per team whether its plays need flipping, from where its attacks land. */
