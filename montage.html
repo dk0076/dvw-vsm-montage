@@ -2279,32 +2279,79 @@ function drawCard(cx, w, h, title, sub, plays, bg){
   const withCourt = (plays || []).some(p => p.ex != null) ||
                     (bg || []).some(p => p.ex != null);
   // Give the court the right-hand third and keep the text clear of it.
-  const textW = withCourt ? w * 0.56 : w - m*2;
+  const textW = (withCourt ? w * 0.56 : w - m*2) - m;
 
   // Family names containing spaces must be quoted or the whole shorthand is
   // rejected and the previous font silently stays in effect.
   const SANS = '"Helvetica Neue", Helvetica, Arial, sans-serif';
   const MONO = 'Menlo, Consolas, monospace';
 
-  let size = Math.round(h * 0.135);
-  const fits = () => {
+  /* Wrap before shrinking. A suggested section name runs long — "Cal Poly
+     middle quick kills out of R3 to deep left corner" — and shrink-only
+     layout drove the title down toward its floor, at which point it ended up
+     smaller than its own subtitle and the two collided: the subtitle's offset
+     was a multiple of the title's shrunken size while the subtitle kept a
+     fixed fraction of the frame height. Three lines at a readable size beats
+     one line at 14px. */
+  const MAXLINES = 3;
+  const wrap = () => {
     cx.font = `bold ${size}px ${SANS}`;
-    return cx.measureText(title).width <= textW - m;
+    const out = [];
+    let cur = '';
+    for (const word of String(title).split(/\s+/).filter(Boolean)){
+      const trial = cur ? cur + ' ' + word : word;
+      // A single word wider than the column has to overhang; nothing to break.
+      if (!cur || cx.measureText(trial).width <= textW) cur = trial;
+      else { out.push(cur); cur = word; }
+    }
+    if (cur) out.push(cur);
+    return out;
   };
-  while (!fits() && size > 14) size -= 2;
+  let size = Math.round(h * 0.135), lines = wrap();
+  while (size > 16 &&
+         (lines.length > MAXLINES || lines.some(l => cx.measureText(l).width > textW))){
+    size -= 2;
+    lines = wrap();
+  }
 
-  const baseline = h * 0.5 + size * 0.34;
+  /* Lay the stack out top-down from its measured height so nothing can land on
+     anything else, and keep the subtitle subordinate to the title at every
+     size. */
+  const lineH   = Math.round(size * 1.15);
+  const subSize = sub ? Math.max(12, Math.min(Math.round(h * 0.042),
+                                              Math.round(size * 0.5))) : 0;
+  const barH    = Math.max(4, Math.round(h * 0.009));
+  const gapBar  = Math.round(size * 0.45);          // bar to the first cap
+  const gapSub  = Math.round(subSize * 1.15);       // title descent to sub cap
+  const capT    = Math.round(size * 0.75);
+  const capS    = Math.round(subSize * 0.78);
+
+  const blockH = barH + gapBar + capT + (lines.length - 1) * lineH +
+                 (sub ? Math.round(size * 0.22) + gapSub + capS : 0);
+
+  let y = Math.round((h - blockH) / 2);
+
   cx.fillStyle = '#8fd0ff';
-  cx.fillRect(m, baseline - size * 1.35, w * 0.06, Math.max(4, h * 0.009));
+  cx.fillRect(m, y, w * 0.06, barH);
+  y += barH + gapBar;
 
   cx.fillStyle = '#eef4fb';
   cx.textBaseline = 'alphabetic';
-  cx.fillText(title, m, baseline);
+  cx.font = `bold ${size}px ${SANS}`;
+  const firstBase = y + capT;
+  lines.forEach((l, i) => cx.fillText(l, m, firstBase + i * lineH));
+  y = firstBase + (lines.length - 1) * lineH;
 
   if (sub){
-    cx.font = `${Math.round(h*0.042)}px ${MONO}`;
+    cx.font = `${subSize}px ${MONO}`;
     cx.fillStyle = '#7d8896';
-    cx.fillText(sub, m, baseline + size * 0.85);
+    // The subtitle was never measured; clip it so it cannot reach the court.
+    let s = String(sub);
+    if (cx.measureText(s).width > textW){
+      while (s.length > 1 && cx.measureText(s + '…').width > textW) s = s.slice(0, -1);
+      s += '…';
+    }
+    cx.fillText(s, m, y + Math.round(size * 0.22) + gapSub + capS);
   }
 
   if (withCourt){
