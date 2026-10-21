@@ -62,6 +62,19 @@ npm run dist    # build dist/montage Setup <version>.exe and a portable .exe
 Ctrl+R reloads and Ctrl+Shift+I opens devtools; both come from Electron's
 default menu.
 
+`build.win.signAndEditExecutable` is `false` deliberately. With it on,
+electron-builder fetches its `winCodeSign` bundle and extracts it with 7-Zip,
+and that archive contains macOS `.dylib` symlinks — so on a Windows account
+without the create-symbolic-link privilege the extraction fails with
+`A required privilege is not held by the client`, retries four times and
+produces no artifacts. Turning it off skips the fetch, because nothing here is
+signed anyway: there is no certificate.
+
+The cost is that `rcedit` never runs, so the `.exe` carries Electron's default
+icon and no version metadata. To get those back, turn on Windows Developer Mode
+(Settings › System › For developers) or build from an elevated shell, then set
+the flag to `true`.
+
 The `build.files` whitelist in `package.json` lists only `montage.html`,
 `desktop/main.js` and `package.json`. Keep it that way — a glob would pull
 `fixtures/` into the installer and ship opponent scouting inside the `.exe`.

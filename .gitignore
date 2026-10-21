@@ -6,3 +6,4 @@ node_modules/
 *.m4v
 *.vsm
 *.dvw
+dist/
