@@ -45,6 +45,35 @@ line up a file that is right.
   season appended on top of the old one instead of replacing it) silently merges
   two players in any player filter. `fixtures/vs-dup-jersey.dvw` is such a file.
 
+## Desktop build
+
+An `.exe` is for this machine, not for the coaches — the whole point of the
+plain HTML file is that it needs no install. `desktop/main.js` is a thin
+Electron window that loads `montage.html` off disk rather than copying it, so
+Ctrl+R picks up an edit and the file stays byte-identical to the one that works
+double-clicked in Chrome.
+
+```bash
+npm install     # pulls Electron, about 300 MB into node_modules
+npm run app     # run it as a desktop window
+npm run dist    # build dist/montage Setup <version>.exe and a portable .exe
+```
+
+Ctrl+R reloads and Ctrl+Shift+I opens devtools; both come from Electron's
+default menu.
+
+The `build.files` whitelist in `package.json` lists only `montage.html`,
+`desktop/main.js` and `package.json`. Keep it that way — a glob would pull
+`fixtures/` into the installer and ship opponent scouting inside the `.exe`.
+
+If you only want it to *feel* like an app and don't care about an installer, a
+Chrome shortcut gets you a windowed, chrome-less version with its own taskbar
+icon for nothing:
+
+```
+chrome.exe --app="file:///C:/Users/drewk/code/dvw-vsm-montage/montage.html"
+```
+
 ## Tests
 
 ```bash
