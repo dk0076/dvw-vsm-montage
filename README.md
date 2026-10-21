@@ -119,6 +119,10 @@ text and the stub video are passed in as part of the evaluated expression.
 `rebuild()` drops every play from a source with no video paired; it is given the
 fixture's filename stem so `autoPair` matches it.
 
+It fails rather than skips when `montage.html` is newer than the build, because
+a pass against a stale exe would report the shipped binary as good while not
+containing the change under test. Rebuild before running it.
+
 Both suites share `test/expected.json`. The `.exe` suite adds the invariants
 that baseline cannot hold — clip count above zero, no NaN or inverted windows,
 every clip labelled — because `tools/rebaseline.js` runs in Node with no DOM and

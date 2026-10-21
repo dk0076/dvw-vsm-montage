@@ -157,6 +157,17 @@ async function main(){
     return 0;
   }
 
+  /* A build older than the source is the one way this suite can mislead: it
+     would pass against an exe that does not contain the change under test and
+     report the shipped binary as good. That is worse than not running, so it
+     fails rather than skipping. */
+  const appSrc = path.join(ROOT, 'montage.html');
+  if (fs.statSync(appSrc).mtimeMs > fs.statSync(exe).mtimeMs + 1000){
+    console.log('FAIL  montage.html is newer than the build in dist/.');
+    console.log('      The exe does not contain your change. Run `npm run dist` first.');
+    return 1;
+  }
+
   console.log(`driving ${path.relative(ROOT, exe)}`);
 
   const port = 30000 + Math.floor(Math.random() * 20000);
