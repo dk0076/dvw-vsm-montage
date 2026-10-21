@@ -117,8 +117,9 @@ chrome.exe --app="file:///C:/Users/drewk/code/dvw-vsm-montage/montage.html"
 ## Tests
 
 ```bash
-npm test         # the parser, in Node
-npm run test:exe # the packaged build, over the DevTools protocol
+npm test           # the parser and the zone grid, in Node
+npm run test:zones # the zone grid alone
+npm run test:exe   # the packaged build, over the DevTools protocol
 ```
 
 Fixtures are not in this repo; see [fixtures/README.md](fixtures/README.md).
@@ -150,7 +151,25 @@ It fails rather than skips when `montage.html` is newer than the build, because
 a pass against a stale exe would report the shipped binary as good while not
 containing the change under test. Rebuild before running it.
 
-Both suites share `test/expected.json`. The `.exe` suite adds the invariants
+`test/zones.js` pins the zone grid twice over, because two different failures
+can take it away. It pins the 45 points exactly, which catches an edited
+constant or a flipped subzone offset and needs no fixtures. Then it re-checks
+the grid against the measurements it was calibrated from — median error, 90th
+percentile, and agreement on court third and depth band — which catches the
+grid drifting away from the court it describes. An exact table cannot catch
+that on its own: the constants and the table could be edited together and
+still be wrong.
+
+The second layer earns its place. Swapping zones 2 and 4 in `montage.html`
+*and* in the pinned table makes the first layer pass silently, and the
+agreement check still fails it on the 90th percentile and court third.
+Shifting every depth band 300 units drops depth agreement from 86.7% to 29.9%;
+dropping the subzone offsets takes median error from 0.63 m to 1.28 m. The
+thresholds sit looser than the observed values so a different VolleyMetrics
+match can be swapped in, and the agreement section skips below 300 pairs
+rather than passing on a sample that says nothing.
+
+Both parser suites share `test/expected.json`. The `.exe` suite adds the invariants
 that baseline cannot hold — clip count above zero, no NaN or inverted windows,
 every clip labelled — because `tools/rebaseline.js` runs in Node with no DOM and
 could never regenerate a clip count.

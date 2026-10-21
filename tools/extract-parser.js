@@ -22,18 +22,27 @@ function slice(src, from, to){
   return src.slice(i, j);
 }
 
+const EXPORTS = ['COURT', 'dvwPoint', 'dvwZonePoint', 'dvwZoneStart', 'orientDvw',
+                 'lane', 'LANE_NAME', 'attackDirection', 'deriveGeometry',
+                 'dvwSection', 'dvwCode', 'parseDvw'];
+
 function loadParser(file = APP){
-  const src = fs.readFileSync(file, 'latin1');
+  /* utf8, not latin1: the third slice ends on a comment rule drawn with
+     box-drawing characters, and under latin1 that marker never matches. */
+  const src = fs.readFileSync(file, 'utf8');
+  /* Kept in declaration order, so nothing references a const before it is
+     evaluated — deriveGeometry reads dvwZonePoint out of the first slice. */
   const code = [
-    slice(src, 'const COURT = {', 'const lane ='),      // COURT, dvwPoint, orientDvw
-    slice(src, "const DVW_SKILLS =", 'function parseVsm'), // dvwSection, dvwCode, parseDvw
+    slice(src, 'const COURT = {', 'const lane ='),         // COURT, dvwPoint, zones, orientDvw
+    slice(src, 'const lane = x =>', '/* ── code vocabulary'), // lane, attackDirection, deriveGeometry
+    slice(src, 'const DVW_SKILLS =', 'function parseVsm'),  // dvwSection, dvwCode, parseDvw
   ].join('\n');
 
   const sandbox = { console };
   vm.createContext(sandbox);
-  vm.runInContext(code + '\n;({ COURT, dvwPoint, orientDvw, dvwSection, dvwCode, parseDvw });',
-                  sandbox, { filename: 'montage.html:dvw' });
-  return vm.runInContext('({ COURT, dvwPoint, orientDvw, dvwSection, dvwCode, parseDvw })', sandbox);
+  const pick = `({ ${EXPORTS.join(', ')} })`;
+  vm.runInContext(code + '\n;' + pick + ';', sandbox, { filename: 'montage.html:dvw' });
+  return vm.runInContext(pick, sandbox);
 }
 
 module.exports = { loadParser, APP };
