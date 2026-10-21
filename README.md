@@ -90,11 +90,12 @@ chrome.exe --app="file:///C:/Users/drewk/code/dvw-vsm-montage/montage.html"
 ## Tests
 
 ```bash
-npm test
+npm test         # the parser, in Node
+npm run test:exe # the packaged build, over the DevTools protocol
 ```
 
 Fixtures are not in this repo; see [fixtures/README.md](fixtures/README.md).
-Without them the suite skips.
+Without them both suites skip.
 
 The suite slices the `.dvw` parser straight out of `montage.html` by marker
 text, so it exercises the code the coach actually runs rather than a second
@@ -102,6 +103,26 @@ copy that would drift. It pins the numbers a column shift would move — touches
 parsed, touches dropped, rally grouping, rotation coverage, and which half of
 the court attacks land in. Plausibility is not the bar: a parse that shifts by
 one column still produces output that looks like volleyball.
+
+`npm test` says nothing about the shipped `.exe` — the asar could be missing the
+HTML, the window could fail to open, WebCodecs could be absent from the packaged
+runtime, and the parser would still pass. `npm run test:exe` covers that: it
+needs a build (`npm run dist`) and skips with a note if there isn't one, then
+launches the real binary with `--remote-debugging-port` and pushes the same
+fixtures through its own renderer.
+
+It goes in over CDP because there is no other way in. A packaged renderer has no
+preload and no Node, so it cannot read a fixture off disk by itself, and a
+drag-and-drop cannot be synthesised from outside the window — so the fixture
+text and the stub video are passed in as part of the evaluated expression.
+`test/assets/stub-video.mp4` is a 4 KB placeholder that exists only because
+`rebuild()` drops every play from a source with no video paired; it is given the
+fixture's filename stem so `autoPair` matches it.
+
+Both suites share `test/expected.json`. The `.exe` suite adds the invariants
+that baseline cannot hold — clip count above zero, no NaN or inverted windows,
+every clip labelled — because `tools/rebaseline.js` runs in Node with no DOM and
+could never regenerate a clip count.
 
 `.vsm` parsing is not yet covered.
 

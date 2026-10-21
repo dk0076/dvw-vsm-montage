@@ -6,6 +6,7 @@
   "main": "desktop/main.js",
   "scripts": {
     "test": "node test/smoke.js",
+    "test:exe": "node test/exe-smoke.js",
     "rebaseline": "node tools/rebaseline.js",
     "app": "electron .",
     "dist": "electron-builder --win"

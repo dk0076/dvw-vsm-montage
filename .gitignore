@@ -2,6 +2,7 @@ fixtures/*
 !fixtures/README.md
 node_modules/
 *.mp4
+!test/assets/stub-video.mp4
 *.mov
 *.m4v
 *.vsm
