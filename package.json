@@ -5,8 +5,9 @@
   "description": "Single-file browser tool that cuts coach-review video from coded volleyball match files",
   "main": "desktop/main.js",
   "scripts": {
-    "test": "node test/smoke.js && node test/zones.js",
+    "test": "node test/smoke.js && node test/zones.js && node test/autopair.js",
     "test:zones": "node test/zones.js",
+    "test:pair": "node test/autopair.js",
     "test:exe": "node test/exe-smoke.js",
     "rebaseline": "node tools/rebaseline.js",
     "app": "electron .",

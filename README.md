@@ -51,6 +51,33 @@ Both formats carry absolute video timestamps, so there is no calibration step.
 The anchor controls on the page exist to correct a file that is wrong, not to
 line up a file that is right.
 
+## Pairing a video to a match
+
+Dropping scout files and videos together pairs them by filename. A date present
+on both sides that disagrees rules a pair out completely; a date that agrees
+outweighs any amount of team-name overlap; a VolleyMetrics match id agreeing is
+stronger still; and the assignment is made best-pair-first across every match at
+once rather than one match at a time.
+
+Each match row says what its pairing rests on — `paired by date + match id`,
+`paired by name only — check`, `paired by you chose it` — because a match id
+agreeing and two files both containing "cal" are not the same claim. Anything
+the filenames cannot confirm is marked **check** and styled as a warning. The
+dropdown on each row overrides it, and a video can only belong to one match.
+
+One match and one video with nothing in common are still paired, since that is
+almost always what was meant, but flagged as a guess. Two files whose dates
+disagree are not paired at all even in that case: a wrong pairing cuts every
+clip at a correct timestamp out of footage of a different session, with every
+label reading correctly and nothing to give it away.
+
+Why these rules and not plain token counting: `2026-10-19 Cal-Cal.dvw`
+tokenises to `[2026, 10, 19, cal]`, because both halves of `Cal-Cal` collapse
+into one token, so any two practice files from the same month agree on three of
+four tokens and the day counts for no more than the year. See
+[test/autopair.js](test/autopair.js), where both failures that came of that are
+pinned.
+
 ## Known limits
 
 - **Zone placement reaches about a third of the attacks in a VolleyStation
@@ -117,8 +144,9 @@ chrome.exe --app="file:///C:/Users/drewk/code/dvw-vsm-montage/montage.html"
 ## Tests
 
 ```bash
-npm test           # the parser and the zone grid, in Node
+npm test           # the parser, the zone grid and the pairing rules, in Node
 npm run test:zones # the zone grid alone
+npm run test:pair  # the filename pairing rules alone (needs no fixtures)
 npm run test:exe   # the packaged build, over the DevTools protocol
 ```
 

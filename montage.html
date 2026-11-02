@@ -621,29 +621,98 @@ async function load(files){
   render();
 }
 
-/* Match each video to a scout file by shared filename tokens — these exports
-   usually share a date and team abbreviations. Anything unmatched is left for
-   the user to assign. */
+/* Match each video to a scout file by filename. These exports usually share a
+   date, a match id and team abbreviations, so the obvious move is to count
+   shared tokens — but counting them flat is exactly what went wrong.
+   "2026-10-19 Cal-Cal.dvw" yields only [2026, 10, 19, cal], because both
+   halves of Cal-Cal collapse into one token, so any two practice files from
+   the same month already agree on three of four tokens and the day counts for
+   no more than the year. Assigning one match at a time in load order, the
+   first file took the other's video and the right match was left with none.
+
+   So: a date present on both sides that disagrees rules the pair out
+   outright; a date that agrees outweighs any amount of team-name coincidence;
+   and the assignment is made best-pair-first across every match at once. Each
+   pairing records how it was reached, because a match id agreeing and two
+   files both containing "cal" are not the same claim, and only the coach can
+   tell a lucky guess from a right one. */
+
+const PAIR = { date: 100, id: 50, token: 1 };
+
+/* Tokens of two characters or more, lowercased, extension dropped. */
+const pairTokens = n => new Set(n.toLowerCase().replace(/\.[^.]+$/,'')
+  .split(/[^a-z0-9]+/).filter(t => t.length > 1));
+
+/* YYYY-MM-DD anywhere in the name, separators optional. Flattened to digits so
+   two of them compare with ===. */
+function pairDate(n){
+  const m = n.match(/(20\d\d)[-_. ]?(0[1-9]|1[0-2])[-_. ]?(0[1-9]|[12]\d|3[01])/);
+  return m ? m[1] + m[2] + m[3] : null;
+}
+
+/* The VolleyMetrics portal's match id: five digits or more, and near enough to
+   unique. A date cannot separate two matches played on the same day; this can. */
+const pairIds = n => new Set(n.match(/\d{5,}/g) || []);
+
+/* null means "never pair these". Anything else carries why, so the row can say. */
+function pairScore(scoutName, videoName){
+  const ds = pairDate(scoutName), dv = pairDate(videoName);
+  if (ds && dv && ds !== dv) return null;          // different day: not this video
+
+  const why = [];
+  let score = 0;
+  if (ds && dv){ score += PAIR.date; why.push('date'); }
+
+  const iv = pairIds(videoName);
+  let ids = 0; pairIds(scoutName).forEach(t => { if (iv.has(t)) ids++; });
+  if (ids){ score += PAIR.id * ids; why.push('match id'); }
+
+  const b = pairTokens(videoName);
+  pairTokens(scoutName).forEach(t => { if (b.has(t)) score += PAIR.token; });
+
+  if (!score) return null;
+  if (!why.length) why.push('name only');
+  /* Weak means nothing in the names confirms it: no agreeing date, no agreeing
+     id, just tokens two unrelated files could happen to share. */
+  return { score, why: why.join(' + '), weak: !(ds && dv) && !ids };
+}
+
 function autoPair(){
-  const toks = n => new Set(n.toLowerCase().replace(/\.[^.]+$/,'')
-    .split(/[^a-z0-9]+/).filter(t => t.length > 1));
-  const free = S.videos.filter(v => !S.sources.some(m => m.videoFile === v));
+  const cands = [];
   for (const M of S.sources){
-    if (M.videoFile) continue;
-    const a = toks(M.scoutName);
-    let best = null, bestScore = 0;
-    for (const v of free){
+    if (M.videoFile) continue;                     // already assigned; leave it
+    for (const v of S.videos){
       if (S.sources.some(m => m.videoFile === v)) continue;
-      const b = toks(v.name);
-      let hit = 0; a.forEach(t => { if (b.has(t)) hit++; });
-      if (hit > bestScore){ bestScore = hit; best = v; }
+      const r = pairScore(M.scoutName, v.name);
+      if (r) cands.push({ M, v, score: r.score, why: r.why, weak: r.weak });
     }
-    if (best && bestScore > 0){ M.videoFile = best; M.videoName = best.name; }
   }
-  // Single pair with no shared tokens: the only sensible assignment is the obvious one.
+  /* Best pair first. Ties break on name rather than load order, so the same
+     set of files gives the same answer however they happened to arrive. */
+  cands.sort((x, y) => y.score - x.score ||
+                       x.M.scoutName.localeCompare(y.M.scoutName) ||
+                       x.v.name.localeCompare(y.v.name));
+
+  const taken = new Set();
+  for (const c of cands){
+    if (c.M.videoFile || taken.has(c.v)) continue;
+    c.M.videoFile = c.v; c.M.videoName = c.v.name;
+    c.M.pairWhy = c.why; c.M.pairWeak = c.weak;
+    taken.add(c.v);
+  }
+
+  /* One match, one video, nothing in the names to go on: pair them, because
+     that is almost always what was meant, but mark it as a guess. Still
+     refused when both names carry dates that disagree — that is not a guess,
+     it is a mismatch, and clips cut at correct timestamps out of the wrong
+     video is the one failure here nobody would spot. */
   if (S.sources.length === 1 && S.videos.length === 1 && !S.sources[0].videoFile){
-    S.sources[0].videoFile = S.videos[0];
-    S.sources[0].videoName = S.videos[0].name;
+    const M = S.sources[0], v = S.videos[0];
+    const ds = pairDate(M.scoutName), dv = pairDate(v.name);
+    if (!(ds && dv && ds !== dv)){
+      M.videoFile = v; M.videoName = v.name;
+      M.pairWhy = 'only video loaded'; M.pairWeak = true;
+    }
   }
 }
 
@@ -1103,6 +1172,7 @@ function parseDvw(text, name){
 
   const M = {
     scoutName: name, videoFile: null, videoName: null, videoDur: 0,
+    pairWhy: null, pairWeak: false,
     unit: 1,                                          // video time in whole seconds
     format: 'dvw',
     teams: { '*': (teamRows[0]||[])[1] || 'Home', 'a': (teamRows[1]||[])[1] || 'Away' },
@@ -1156,6 +1226,7 @@ function parseVsm(text, name){
   const d = JSON.parse(text);
   const M = {
     scoutName: name, videoFile: null, videoName: null, videoDur: 0,
+    pairWhy: null, pairWeak: false,
     unit: 0.1,                                        // deciseconds
     format: 'vsm', raw: d,
     labels: Object.assign({}, codeTable(d.attackCombinations), codeTable(d.setterCalls)),
@@ -3324,15 +3395,29 @@ function renderMatches(){
     sel.onchange = async () => {
       const f = sel.value === '' ? null : S.videos[+sel.value];
       // A video can only belong to one match.
-      if (f) S.sources.forEach(o => { if (o !== M && o.videoFile === f){ o.videoFile = null; o.videoDur = 0; } });
+      if (f) S.sources.forEach(o => { if (o !== M && o.videoFile === f){
+        o.videoFile = null; o.videoDur = 0; o.pairWhy = null; o.pairWeak = false; } });
       M.videoFile = f; M.videoName = f ? f.name : null; M.videoDur = 0; M.mp4 = null;
+      // Chosen by hand, so it is no longer a guess and stops being flagged as one.
+      M.pairWhy = f ? 'you chose it' : null; M.pairWeak = false;
       await measureVideos(); rebuild(); render();
     };
     row.appendChild(sel);
 
+    /* Say what the pairing rests on. Without this a date and a match id
+       agreeing looks exactly like two files that both happen to contain
+       "cal", and the wrong video cuts clips at plausible timestamps. */
     if (!M.videoFile){
       const w = el('span','warn','needs a video'); w.style.fontSize = '11.5px';
       row.appendChild(w);
+    } else if (M.pairWhy){
+      const weak = M.pairWeak;
+      const note = el('span', weak ? 'warn' : null,
+                      `paired by ${M.pairWhy}${weak ? ' — check' : ''}`);
+      note.style.fontSize = '11.5px';
+      if (!weak) note.style.color = 'var(--dim)';
+      else note.title = 'nothing in the two filenames confirms this is the right video';
+      row.appendChild(note);
     }
     const x = el('button', null, '\u2715');
     x.title = 'remove this match';

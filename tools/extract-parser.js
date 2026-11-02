@@ -45,4 +45,33 @@ function loadParser(file = APP){
   return vm.runInContext(pick, sandbox);
 }
 
-module.exports = { loadParser, APP };
+/* The filename pairing rules. autoPair reads S.sources and S.videos and writes
+   the pairing back onto them, so `pair` hands in a stub and returns it. Sliced
+   rather than reimplemented for the same reason as the parser: a second copy
+   of the scoring would agree with itself while disagreeing with the app. */
+function loadPairing(file = APP){
+  const src = fs.readFileSync(file, 'utf8');
+  const code = slice(src, 'const PAIR = {', 'function measureVideos');
+
+  const sandbox = { console, S: { sources: [], videos: [] } };
+  vm.createContext(sandbox);
+  const pick = '({ PAIR, pairTokens, pairDate, pairIds, pairScore, autoPair })';
+  vm.runInContext(code + '\n;' + pick + ';', sandbox, { filename: 'montage.html:pairing' });
+  const api = vm.runInContext(pick, sandbox);
+
+  return Object.assign({}, api, {
+    /* names in, sources out — each with videoName, pairWhy and pairWeak set
+       exactly as the app would set them. */
+    pair(scoutNames, videoNames){
+      const sources = scoutNames.map(n => typeof n === 'string'
+        ? { scoutName: n, videoFile: null, videoName: null, pairWhy: null, pairWeak: false }
+        : n);
+      const videos = videoNames.map(n => (typeof n === 'string' ? { name: n } : n));
+      sandbox.S = { sources, videos };
+      api.autoPair();
+      return sources;
+    },
+  });
+}
+
+module.exports = { loadParser, loadPairing, APP };
