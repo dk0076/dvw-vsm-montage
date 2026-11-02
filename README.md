@@ -98,6 +98,11 @@ pinned.
 - **Duplicate jersey numbers pass without a warning.** A stacked roster (a new
   season appended on top of the old one instead of replacing it) silently merges
   two players in any player filter. `fixtures/vs-dup-jersey.dvw` is such a file.
+- **An agreeing date alone counts as a firm pairing.** Two matches played the
+  same day, with no VolleyMetrics match id in either filename and only the
+  correct video's counterpart missing, will pair on the date and not be flagged.
+  Filenames cannot settle that case, which is why the row says `paired by date`
+  rather than `date + match id` — the distinction is there to be read.
 
 ## Desktop build
 
